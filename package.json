@@ -7,6 +7,10 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
+    "unsplash": "node index.js unsplash",
+    "pexels": "node index.js pexels",
+    "pixabay": "node index.js pixabay",
+    "naver": "node index.js naver",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
