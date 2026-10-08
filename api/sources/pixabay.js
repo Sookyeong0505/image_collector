@@ -40,6 +40,7 @@ module.exports = {
     getId: (photo) => String(photo.id),
     getImageUrl: (photo) => photo.largeImageURL ?? photo.webformatURL,
 
-    // 페이지 범위 초과(400)는 에러가 아니라 "결과 끝" 신호
-    isEndOfResults: (err) => err instanceof HttpError && err.status === 400,
+    // 페이지 범위 초과(400)는 에러가 아니라 "결과 끝" 신호.
+    // 단, 잘못된 API 키도 400 을 돌려주므로 첫 페이지의 400 은 진짜 에러로 남긴다.
+    isEndOfResults: (err, page) => err instanceof HttpError && err.status === 400 && page > 1,
 };

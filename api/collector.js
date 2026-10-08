@@ -51,7 +51,7 @@ const {
  *
  * @property {(err: Error) => boolean} [isFatal]         true → 실행 전체를 중단
  * @property {(err: Error) => boolean} [isSkippable]     true → '실패'가 아닌 '건너뜀'으로 집계
- * @property {(err: Error) => boolean} [isEndOfResults]  검색 API 에러를 '결과 끝'으로 해석
+ * @property {(err: Error, cursor: *) => boolean} [isEndOfResults]  검색 API 에러를 '결과 끝'으로 해석
  *
  * @property {number} [itemDelayMs=0]  이미지 1장 처리 후 쉬는 시간
  * @property {number} [pageDelayMs=0]  검색 페이지 1개 처리 후 쉬는 시간
@@ -145,7 +145,7 @@ async function loadPage(spec, cursor, ctx) {
         const data = await spec.fetchPage(cursor, ctx);
         return spec.parsePage(data, cursor);
     } catch (err) {
-        if (spec.isEndOfResults?.(err)) {
+        if (spec.isEndOfResults?.(err, cursor)) {
             console.log('[안내] 페이지 범위 끝에 도달했습니다.');
             return null;
         }

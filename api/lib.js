@@ -16,13 +16,41 @@ const notifier = require('node-notifier');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /* ------------------------------------------------------------------ */
+/* URL 마스킹                                                          */
+/* ------------------------------------------------------------------ */
+
+// Pixabay 처럼 API 키를 URL 쿼리로 받는 API 가 있다.
+// URL 을 로그·에러 메시지에 그대로 찍으면 키가 노출되므로 이 이름의 파라미터 값은 가린다.
+const SECRET_PARAMS = new Set([
+    'key', 'apikey', 'api_key', 'client_id', 'client_secret', 'access_token', 'token',
+]);
+
+/**
+ * 로그·에러 메시지용 URL — 비밀 쿼리 파라미터 값을 *** 로 바꾼다.
+ * 예) https://pixabay.com/api/?key=abcd&q=cat → https://pixabay.com/api/?key=***&q=cat
+ */
+function redactUrl(url) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return '(잘못된 URL)'; // 파싱 못 하면 원문을 내보내지 않는다
+    }
+    for (const name of [...parsed.searchParams.keys()]) {
+        if (SECRET_PARAMS.has(name.toLowerCase())) parsed.searchParams.set(name, '***');
+    }
+    return parsed.toString();
+}
+
+/* ------------------------------------------------------------------ */
 /* 에러 타입                                                           */
 /* ------------------------------------------------------------------ */
 
 /** HTTP 응답은 받았으나 2xx가 아닌 경우 */
 class HttpError extends Error {
     constructor(status, url, bodySnippet = '') {
-        super(`HTTP ${status} — ${url}`);
+        // 이 메시지는 run() 의 [치명적 오류] 출력과 수집기의 실패 로그에 그대로 찍힌다
+        super(`HTTP ${status} — ${redactUrl(url)}`);
         this.name = 'HttpError';
         this.status = status;
         this.bodySnippet = bodySnippet;
@@ -121,7 +149,7 @@ async function fetchWithRetry(url, options = {}, { retries = 4, timeoutMs = 60_0
             if (attempt === retries) {
                 throw new HttpError(res.status, url);
             }
-            console.log(`  ↻ ${label || url} — HTTP ${res.status}, ${Math.round(wait / 1000)}초 후 재시도 (${attempt + 1}/${retries})`);
+            console.log(`  ↻ ${label || redactUrl(url)} — HTTP ${res.status}, ${Math.round(wait / 1000)}초 후 재시도 (${attempt + 1}/${retries})`);
             await sleep(wait);
             continue;
         } catch (err) {
@@ -132,12 +160,12 @@ async function fetchWithRetry(url, options = {}, { retries = 4, timeoutMs = 60_0
 
             const wait = backoffDelay(attempt);
             const code = err?.cause?.code || err?.code || err?.name || 'unknown';
-            console.log(`  ↻ ${label || url} — ${code}, ${Math.round(wait / 1000)}초 후 재시도 (${attempt + 1}/${retries})`);
+            console.log(`  ↻ ${label || redactUrl(url)} — ${code}, ${Math.round(wait / 1000)}초 후 재시도 (${attempt + 1}/${retries})`);
             await sleep(wait);
         }
     }
 
-    throw lastError ?? new Error(`요청 실패: ${url}`);
+    throw lastError ?? new Error(`요청 실패: ${redactUrl(url)}`);
 }
 
 /** 1s → 2s → 4s → 8s (최대 30s) + 지터 */
