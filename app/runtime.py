@@ -1,11 +1,19 @@
 """실행에 필요한 부품을 조립한다. CLI 와 웹 서버가 같은 조립 코드를 쓴다.
 
-    Settings ─┬─ SQLite 연결 (스키마 준비, 죽기 전 작업 복구)
+    Settings ─┬─ SQLite 연결 (스키마 준비)
               ├─ httpx 클라이언트 → Http (재시도)
               ├─ 사이트 명세들
               └─ Scheduler
+
+여는 방식은 두 가지다.
+
+    collector=True   수집을 하려는 실행 (serve / collect / resume)
+                     → 잠금을 얻고(이미 도는 수집기가 있으면 거부), 죽기 전 상태를 정리한다
+    collector=False  들여다보기만 하는 실행 (status / check)
+                     → 잠금 없이 열고 아무것도 바꾸지 않는다. 수집기가 도는 중에도 안전하다
 """
 
+import logging
 import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -13,10 +21,14 @@ from dataclasses import dataclass
 import httpx
 
 from .collector.http import Http, HttpError, NetworkError
+from .collector.images import remove_partial_files
 from .collector.scheduler import Scheduler
 from .collector.sources import Source, build_sources
 from .config import Settings
 from .db import connect, init_db, repo
+from .instance_lock import InstanceLock
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,25 +41,42 @@ class Runtime:
 
 
 @asynccontextmanager
-async def open_runtime(settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
-    """transport 는 테스트에서 가짜 웹을 끼워 넣을 때만 쓴다."""
-    conn = connect(settings.db_path)
-    init_db(conn)
-    repo.recover_interrupted(conn)
+async def open_runtime(settings: Settings, transport: httpx.AsyncBaseTransport | None = None, *,
+                       collector: bool = True):
+    """transport 는 테스트에서 가짜 웹을 끼워 넣을 때만 쓴다.
 
-    # 이미지 CDN 은 리다이렉트가 흔하다. 연결 수를 제한해 RAM 과 상대 서버 부담을 줄인다.
-    client = httpx.AsyncClient(
-        transport=transport, follow_redirects=True,
-        limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
-    )
+    collector=True 인데 다른 수집기가 이미 돌고 있으면 AlreadyRunning 을 낸다.
+    """
+    lock = InstanceLock(settings.db_path.with_name(settings.db_path.name + ".lock"))
+    if collector:
+        lock.acquire()
+
     try:
-        http = Http(client, retries=settings.max_retries, timeout=settings.timeout)
-        sources = build_sources(settings)
-        configured = {name: source for name, source in sources.items() if source.configured}
-        yield Runtime(settings, conn, http, sources, Scheduler(conn, settings, configured, http))
+        conn = connect(settings.db_path)
+        init_db(conn)
+
+        if collector:
+            # 여기부터는 수집기가 나 하나뿐이다. 지난 실행이 남긴 흔적을 정리한다.
+            recovered = repo.recover_interrupted(conn)   # 돌다가 끊긴 작업 → 다시 대기
+            removed = remove_partial_files(settings.base_save_path)   # 쓰다 만 이미지 파일
+            if recovered or removed:
+                log.info("이전 실행 정리: 끊긴 작업 %d개를 대기로 되돌림, 임시 파일 %d개 삭제", recovered, removed)
+
+        # 이미지 CDN 은 리다이렉트가 흔하다. 연결 수를 제한해 RAM 과 상대 서버 부담을 줄인다.
+        client = httpx.AsyncClient(
+            transport=transport, follow_redirects=True,
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+        )
+        try:
+            http = Http(client, retries=settings.max_retries, timeout=settings.timeout)
+            sources = build_sources(settings)
+            configured = {name: source for name, source in sources.items() if source.configured}
+            yield Runtime(settings, conn, http, sources, Scheduler(conn, settings, configured, http))
+        finally:
+            await client.aclose()
+            conn.close()
     finally:
-        await client.aclose()
-        conn.close()
+        lock.release()
 
 
 async def check_source(source: Source, http: Http) -> tuple[bool, str]:

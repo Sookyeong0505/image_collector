@@ -95,3 +95,21 @@ def save_image(base: Path, relative: str, data: bytes) -> None:
     temp = final.with_name(final.name + ".part")
     temp.write_bytes(data)
     os.replace(temp, final)
+
+
+def remove_partial_files(base: Path) -> int:
+    """쓰다 만 임시 파일(.part)을 지우고 지운 개수를 돌려준다.
+
+    이미지를 쓰는 도중에 프로세스가 강제 종료되면 .part 가 남는다.
+    수집기가 시작할 때 한 번 호출한다 (잠금을 얻은 뒤라서 다른 수집기가 쓰는 중인 파일일 수 없다).
+    """
+    if not base.exists():
+        return 0
+    removed = 0
+    for path in base.rglob("*.part"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass  # 지우지 못해도 수집에는 지장이 없다
+    return removed

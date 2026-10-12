@@ -17,6 +17,7 @@
 SQLite 연결 하나를 잠금 없이 함께 쓸 수 있다.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .db import repo
+from .instance_lock import AlreadyRunning
 from .logging_setup import setup_logging
 from .runtime import Runtime, check_source, open_runtime, parse_keywords
 
@@ -46,11 +48,16 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def lifespan(app: FastAPI):
         if settings is None:
             setup_logging()
-        async with open_runtime(settings or Settings.from_env(), transport) as runtime:
-            app.state.runtime = runtime
-            runtime.scheduler.start()
-            yield
-            await runtime.scheduler.stop()   # 돌던 작업은 pending 으로 돌아가 다음 실행 때 이어진다
+        try:
+            async with open_runtime(settings or Settings.from_env(), transport) as runtime:
+                app.state.runtime = runtime
+                runtime.scheduler.start()
+                yield
+                await runtime.scheduler.stop()   # 돌던 작업은 pending 으로 돌아가 다음 실행 때 이어진다
+        except AlreadyRunning as err:
+            # 콘솔이 없는 실행(자동 시작)에서도 이유를 알 수 있게 로그 파일에 남기고 서버를 띄우지 않는다
+            logging.getLogger(__name__).error("서버를 시작하지 않습니다: %s", err)
+            raise
 
     app = FastAPI(title="이미지 수집기", lifespan=lifespan)
 

@@ -15,6 +15,7 @@ import sys
 
 from .config import Settings
 from .db import repo
+from .instance_lock import AlreadyRunning
 from .logging_setup import setup_logging
 from .runtime import check_source, open_runtime, parse_keywords
 
@@ -55,6 +56,10 @@ def main() -> None:
     setup_logging()
     try:
         sys.exit(asyncio.run(_run(args)))
+    except AlreadyRunning as err:
+        # 수집기가 둘이 되면 같은 작업을 동시에 처리하게 된다. 실행하지 않고 안내만 한다.
+        print(f"{err}\n키워드 등록과 진행 확인은 웹 화면에서 하세요. 직접 실행하려면 먼저 돌고 있는 수집기를 멈춰야 합니다.")
+        sys.exit(1)
     except KeyboardInterrupt:
         # 돌던 작업은 pending 으로 돌아가 있다. 커서가 저장돼 있어 resume 으로 이어서 할 수 있다.
         print("\n중단했습니다. 'python -m app resume' 으로 이어서 수집할 수 있습니다.")
@@ -63,7 +68,10 @@ def main() -> None:
 async def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
 
-    async with open_runtime(settings) as runtime:
+    # status 와 check 는 들여다보기만 하므로, 수집기가 도는 중에도 실행할 수 있게 잠금 없이 연다
+    is_collector = args.command in ("collect", "resume")
+
+    async with open_runtime(settings, collector=is_collector) as runtime:
         if args.command == "status":
             _print_progress(runtime.conn)
             return 0

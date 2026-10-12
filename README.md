@@ -81,6 +81,9 @@ copy .env.sample .env
 명령 앞에 `.venv\Scripts\`를 붙여 실행합니다. `collect`에서 `--sites`를 빼면 키가 설정된 모든 사이트에서,
 `--target`을 빼면 `.env`의 `MAX_DOWNLOADS`만큼 받습니다. `Ctrl+C`로 멈춘 뒤 `resume`으로 이어서 할 수 있습니다.
 
+수집기(`serve`, `collect`, `resume`)는 한 번에 하나만 실행할 수 있습니다. 이미 돌고 있으면 두 번째 실행은 거부됩니다.
+`check`와 `status`는 수집기가 도는 중에도 실행할 수 있습니다.
+
 ### 작업 상태의 의미
 
 | 상태 | 의미 |
@@ -131,7 +134,28 @@ powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
 - 프로젝트 폴더와 이미지 저장 폴더가 로컬 디스크에 있어야 합니다. 이 방식은 네트워크 드라이브에 접근하지 못합니다.
 - 로그인 전에는 Wi-Fi가 연결되지 않는 PC가 있습니다. 유선 랜에서는 문제없습니다.
 - 노트북 덮개를 닫거나 전원 버튼으로 절전시키는 것은 막지 못합니다.
-- 작업으로 실행 중일 때는 같은 포트로 `python -m app serve`를 또 띄울 수 없습니다.
+- 수집기는 한 번에 하나만 실행됩니다. 작업이 도는 중에 `serve`, `collect`, `resume`을 실행하면 거부됩니다.
+  키워드 등록은 웹 화면에서 하고, 진행 확인은 웹 화면이나 `python -m app status`로 합니다.
+
+**코드나 설정을 고친 뒤 반영하기**
+
+실행 중인 서버는 시작할 때 읽은 코드를 계속 씁니다. 고친 내용을 반영하려면 작업을 다시 시작합니다.
+수집 중이어도 괜찮습니다. 멈춘 페이지부터 이어서 합니다.
+
+```
+Stop-ScheduledTask -TaskName ImageCollector
+Start-ScheduledTask -TaskName ImageCollector
+```
+
+| 고친 것 | 반영 방법 |
+|---|---|
+| `app\static\index.html` (화면) | 브라우저 새로고침 |
+| `.py` 파일, `.env` | 작업 재시작 |
+| 새 라이브러리 | `pip install` 후 작업 재시작 |
+| `schema.sql`에 새 테이블 추가 | 작업 재시작 |
+| `schema.sql`의 기존 테이블 변경 | 재시작만으로는 반영되지 않음. 기존 DB를 바꾸는 작업이 따로 필요 |
+
+재시작 후 서버가 뜨지 않으면 작업을 멈추고 `python -m app serve`를 직접 실행해 콘솔의 오류를 확인합니다.
 
 ## 결과물이 저장되는 곳
 
@@ -167,6 +191,7 @@ app/
 ├── config.py                .env → Settings
 ├── logging_setup.py         콘솔 + 파일 로그 설정
 ├── keep_awake.py            남은 작업이 있는 동안 절전 방지
+├── instance_lock.py         수집기가 한 번에 하나만 돌도록 막는 잠금
 ├── timeutil.py              UTC 시각 ↔ DB 문자열 변환
 ├── static/index.html        진행 화면
 ├── db/
