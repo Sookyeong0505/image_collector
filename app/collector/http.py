@@ -2,7 +2,7 @@
 
   - redact_url     : 로그에 찍힐 URL 에서 API 키를 가린다
   - Http.get       : 네트워크 오류 / 429 / 5xx 를 지수 백오프로 재시도
-  - HourlyLimiter  : 시간당 호출 한도. 한도에 닿으면 남은 시간만큼만 기다린다
+  - RateLimiter    : 호출 한도. 서버가 알려 주는 남은 횟수에 맞추고, 한도에 닿으면 남은 시간만 기다린다
 """
 
 import asyncio
@@ -120,37 +120,56 @@ class Http:
         raise AssertionError("unreachable")
 
 
-# ── 시간당 호출 한도 ────────────────────────────────────────────────
+# ── 호출 한도 ───────────────────────────────────────────────────────
 
 
-class HourlyLimiter:
-    """시간당 N회 한도. API 를 호출하기 직전에 `await limiter.take()` 를 부른다.
+class RateLimiter:
+    """'window 초 동안 limit 회' 한도. API 를 호출하기 직전에 `await limiter.take()` 를 부른다.
 
-    한도에 닿으면 1시간을 통째로 쉬지 않고, 창(window)의 남은 시간만 기다린다.
+    남은 횟수를 아는 방법은 두 가지이고, 둘을 함께 쓴다.
+
+      1. 직접 센다         take() 를 부를 때마다 1씩 올린다. 프로그램을 다시 켜면 0부터라서 부정확해진다.
+      2. 서버가 알려 준다   응답 헤더의 남은 횟수를 sync() 로 받아 1번의 값을 덮어쓴다.
+                          재시작했든, 같은 키를 다른 곳에서 썼든 서버 기준으로 맞춰진다.
+
+    헤더를 주지 않는 사이트는 1번만으로 동작한다.
+    한도에 닿으면 창(window)이 끝날 때까지만 기다린다. 끝나는 시각도 서버가 알려 주면 그 값을 쓴다.
     """
 
-    WINDOW = 3600.0
-    MARGIN = 5.0  # 서버 시계와의 오차 여유
+    MARGIN = 5.0  # 서버 시계와의 오차 여유(초)
 
-    def __init__(self, limit: int | None, *, clock: Callable[[], float] = time.monotonic,
-                 sleep: Sleep = asyncio.sleep):
+    def __init__(self, limit: int | None, window: float = 3600.0, *,
+                 clock: Callable[[], float] = time.monotonic, sleep: Sleep = asyncio.sleep):
         self.limit = limit
+        self.window = window
         self._clock = clock
         self._sleep = sleep
-        self._count = 0
+        self._count = 0                         # 이번 창에서 쓴 횟수
         self._window_start = clock()
+        self._reset_at: float | None = None     # 서버가 알려 준 창 종료 시각
+        self._hold_until: float | None = None   # 이 시각까지는 호출하지 않는다 (다른 종류의 한도 소진)
+
+    @property
+    def remaining(self) -> int | None:
+        """이번 창에서 더 쓸 수 있는 횟수. 한도가 없으면 None."""
+        if not self.limit:
+            return None
+        self._roll()
+        return max(self.limit - self._count, 0)
 
     async def take(self, on_wait: Callable[[float], None] | None = None,
                    on_resume: Callable[[], None] | None = None) -> None:
         """호출 1회분을 사용한다. 기다려야 하면 on_wait(초) → 대기 → on_resume() 순으로 알린다."""
-        if not self.limit:
-            return
+        self._roll()
+        now = self._clock()
 
-        if self._clock() - self._window_start >= self.WINDOW:
-            self._reset()
+        wait = 0.0
+        if self.limit and self._count >= self.limit:
+            wait = self._window_end() - now + self.MARGIN
+        if self._hold_until is not None and self._hold_until > now:
+            wait = max(wait, self._hold_until - now + self.MARGIN)
 
-        if self._count >= self.limit:
-            wait = self.WINDOW - (self._clock() - self._window_start) + self.MARGIN
+        if wait > 0:
             if on_wait:
                 on_wait(wait)
             await self._sleep(wait)
@@ -160,6 +179,39 @@ class HourlyLimiter:
 
         self._count += 1
 
+    def sync(self, *, limit: int, remaining: int, reset_in: float | None = None) -> None:
+        """서버가 응답 헤더로 알려 준 값으로 맞춘다.
+
+        limit      서버 기준 한도 (우리가 정한 self.limit 은 이보다 조금 낮게 잡아 여유를 둔다)
+        remaining  서버 기준 남은 횟수
+        reset_in   창이 끝날 때까지 남은 초. 알려 주지 않는 사이트는 None
+        """
+        if not self.limit:
+            return
+        now = self._clock()
+        used = max(limit - remaining, 0)
+
+        # 우리가 센 것보다 적게 썼다고 하면 서버 쪽에서 창이 새로 시작된 것이다
+        if used < self._count:
+            self._window_start = now
+        self._count = used
+        if reset_in is not None:
+            self._reset_at = now + reset_in
+
+    def hold(self, seconds: float) -> None:
+        """이 제한기가 세는 것과 다른 한도(예: 월간 한도)가 소진됐을 때, 그만큼 호출을 미룬다."""
+        self._hold_until = self._clock() + max(seconds, 0)
+
+    def _window_end(self) -> float:
+        return self._reset_at if self._reset_at is not None else self._window_start + self.window
+
+    def _roll(self) -> None:
+        """창이 끝났으면 새 창을 시작한다."""
+        if self._clock() >= self._window_end():
+            self._reset()
+
     def _reset(self) -> None:
         self._count = 0
         self._window_start = self._clock()
+        self._reset_at = None
+        self._hold_until = None

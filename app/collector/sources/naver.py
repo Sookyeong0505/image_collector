@@ -20,7 +20,7 @@ MAX_START = 1000  # start 파라미터 최대값
 class Naver(Source):
     name = "naver"
     required_env = ("NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET")
-    page_delay = 0.5  # 시간당 한도 대신 페이지마다 잠깐 쉰다
+    page_delay = 0.5  # 한도 정보를 주지 않는 API 라서 페이지마다 잠깐 쉰다
 
     # Referer / User-Agent 를 넣어야 핫링크 차단(403)을 상당수 피할 수 있다
     image_headers = {
@@ -39,7 +39,7 @@ class Naver(Source):
             "X-NCP-APIGW-API-KEY-ID": self.env["NAVER_CLIENT_ID"],
             "X-NCP-APIGW-API-KEY": self.env["NAVER_CLIENT_SECRET"],
         }
-        response = await http.get(url, headers=headers, label=self.name)
+        response = await self.api_get(http, url, headers)
         return response.json()
 
     # 응답 예: { total, start, display, items: [{ link, thumbnail, ... }] }

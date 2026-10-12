@@ -64,7 +64,12 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     @app.get("/api/sites")
     async def list_sites(request: Request):
         return [
-            {"name": name, "configured": source.configured, "hourly_limit": source.hourly_limit}
+            {
+                "name": name, "configured": source.configured,
+                "rate_limit": source.rate_limit, "rate_window": source.rate_window,
+                # 이번 창에서 더 쓸 수 있는 API 호출 수 (서버 헤더 기준으로 맞춘 값). 한도가 없으면 null
+                "calls_left": source.limiter.remaining if source.limiter else None,
+            }
             for name, source in runtime_of(request).sources.items()
         ]
 

@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from app.collector.http import Http, HttpError, HourlyLimiter, NetworkError, redact_url
+from app.collector.http import Http, HttpError, RateLimiter, NetworkError, redact_url
 
 
 def test_URL의_API_키를_가린다():
@@ -70,7 +70,7 @@ def test_재시도를_다_쓰면_NetworkError이고_키는_가려진다(web, htt
 
 
 def test_한도에_닿으면_남은_시간만_기다린다(clock):
-    limiter = HourlyLimiter(2, clock=clock.monotonic, sleep=clock.sleep)
+    limiter = RateLimiter(2, clock=clock.monotonic, sleep=clock.sleep)
     waited, resumed = [], []
 
     async def scenario():
@@ -86,7 +86,7 @@ def test_한도에_닿으면_남은_시간만_기다린다(clock):
 
 
 def test_한도가_없으면_기다리지_않는다(clock):
-    limiter = HourlyLimiter(None, clock=clock.monotonic, sleep=clock.sleep)
+    limiter = RateLimiter(None, clock=clock.monotonic, sleep=clock.sleep)
 
     async def scenario():
         for _ in range(1000):

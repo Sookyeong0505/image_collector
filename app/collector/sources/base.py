@@ -9,8 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+import httpx
+
 from ...config import Settings
-from ..http import Http, HttpError
+from ..http import Http, HttpError, RateLimiter
 
 
 @dataclass(frozen=True)
@@ -23,7 +25,8 @@ class Page:
 class Source:
     name: str = ""
     required_env: tuple[str, ...] = ()   # 이 사이트에 필요한 .env 키
-    hourly_limit: int | None = None      # 시간당 API 호출 한도. None = 제한 없음
+    rate_limit: int | None = None        # rate_window 초 동안 쓸 API 호출 수. None = 제한 없음
+    rate_window: float = 3600.0
     first_cursor: str = "1"
     item_delay: float = 0.0              # 이미지 1장 받은 뒤 쉬는 시간(초)
     page_delay: float = 0.0              # 검색 페이지 1개 처리한 뒤 쉬는 시간(초)
@@ -37,6 +40,7 @@ class Source:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.env = settings.env
+        self.limiter: RateLimiter | None = None   # 스케줄러가 붙여 준다
 
     @property
     def configured(self) -> bool:
@@ -66,6 +70,9 @@ class Source:
     async def after_save(self, item: Any, http: Http, take_api_slot) -> None:
         """새 이미지를 저장한 직후 할 일 (예: Unsplash 다운로드 트리거)."""
 
+    def read_rate_headers(self, headers: httpx.Headers, limiter: RateLimiter) -> None:
+        """응답 헤더에 남은 호출 횟수가 있으면 limiter 에 알려 준다. 헤더 이름과 뜻이 사이트마다 다르다."""
+
     def is_auth_error(self, err: HttpError) -> bool:
         """검색 API 에러가 '키가 틀림'을 뜻하는지. 3번 쌓이면 작업이 실패 처리된다."""
         return err.status in (401, 403)
@@ -79,6 +86,21 @@ class Source:
         return False
 
     # ── 공통 도우미 ─────────────────────────────────────────────────
+
+    async def api_get(self, http: Http, url: str, headers: dict | None = None) -> httpx.Response:
+        """이 사이트의 API 를 호출한다. 응답이 오면 헤더의 한도 정보를 제한기에 반영한다."""
+        response = await http.get(url, headers=headers, label=self.name)
+        if self.limiter is not None:
+            self.read_rate_headers(response.headers, self.limiter)
+        return response
+
+    @staticmethod
+    def header_number(headers: httpx.Headers, name: str) -> float | None:
+        """숫자 헤더를 읽는다. 없거나 숫자가 아니면 None."""
+        try:
+            return float(headers[name])
+        except (KeyError, ValueError):
+            return None
 
     async def check(self, http: Http) -> None:
         """API 연결 확인: 검색을 한 번 해 본다. 문제가 있으면 예외가 난다."""

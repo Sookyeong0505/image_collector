@@ -1,13 +1,16 @@
 """Pixabay — https://pixabay.com/api/docs/
 
   - 인증  : URL 쿼리 ?key=<API_KEY>  (로그에는 http.redact_url 이 가려서 찍는다)
-  - 한도  : 분당 100회
+  - 한도  : 60초당 100회
+            응답 헤더: X-RateLimit-Limit(100), X-RateLimit-Remaining(남은 횟수), X-RateLimit-Reset(초기화까지 남은 초)
   - 페이지: totalHits = API 로 실제 받을 수 있는 수 (보통 500장 상한)
             범위를 넘는 페이지를 요청하면 HTTP 400 을 돌려준다
   - 주의  : API 키가 틀려도 HTTP 400 이다. 응답 본문으로 구분해야 한다.
 """
 
-from ..http import Http, HttpError
+import httpx
+
+from ..http import Http, HttpError, RateLimiter
 from .base import Page, Source
 
 PER_PAGE = 200  # Pixabay 최대값
@@ -16,7 +19,8 @@ PER_PAGE = 200  # Pixabay 최대값
 class Pixabay(Source):
     name = "pixabay"
     required_env = ("PIXABAY_API_KEY",)
-    hourly_limit = 5000
+    rate_limit = 95   # 서버 한도 100 에서 5회 여유
+    rate_window = 60.0
     item_delay = 0.15
 
     async def fetch_page(self, cursor: str, keyword: str, http: Http) -> dict:
@@ -24,7 +28,7 @@ class Pixabay(Source):
             f"https://pixabay.com/api/?key={self.env['PIXABAY_API_KEY']}&q={self.q(keyword)}"
             f"&image_type=photo&page={cursor}&per_page={PER_PAGE}"
         )
-        response = await http.get(url, label=self.name)
+        response = await self.api_get(http, url)
         return response.json()
 
     # 응답 예: { total, totalHits, hits: [...] }
@@ -42,6 +46,13 @@ class Pixabay(Source):
 
     def image_url(self, item: dict) -> str | None:
         return item.get("largeImageURL") or item.get("webformatURL")
+
+    def read_rate_headers(self, headers: httpx.Headers, limiter: RateLimiter) -> None:
+        limit = self.header_number(headers, "x-ratelimit-limit")
+        remaining = self.header_number(headers, "x-ratelimit-remaining")
+        if limit is not None and remaining is not None:
+            limiter.sync(limit=int(limit), remaining=int(remaining),
+                         reset_in=self.header_number(headers, "x-ratelimit-reset"))
 
     def is_auth_error(self, err: HttpError) -> bool:
         # 실제 응답: [ERROR 400] Invalid or missing API key (https://pixabay.com/api/docs/).

@@ -28,7 +28,7 @@ from ..keep_awake import KeepAwake
 from ..timeutil import from_db, to_db, utcnow
 from .dedup import PhashIndex
 from .engine import Deps, run_job
-from .http import AuthFailure, Http, HourlyLimiter, Sleep
+from .http import AuthFailure, Http, RateLimiter, Sleep
 from .sources import Source
 
 log = logging.getLogger(__name__)
@@ -47,11 +47,12 @@ class Scheduler:
 
         self.deps = Deps(conn, settings, http, PhashIndex.load(conn, settings.phash_threshold), sleep, clock)
 
-        # 한도는 사이트 단위라서 키워드가 바뀌어도 같은 제한기를 계속 쓴다
-        self.limiters = {
-            name: HourlyLimiter(source.hourly_limit, clock=monotonic, sleep=sleep)
-            for name, source in sources.items()
-        }
+        # 한도는 사이트 단위라서 키워드가 바뀌어도 같은 제한기를 계속 쓴다.
+        # 사이트 명세에도 붙여 준다 → 명세가 응답 헤더를 읽어 제한기를 서버 기준으로 맞춘다.
+        self.limiters: dict[str, RateLimiter] = {}
+        for name, source in sources.items():
+            limiter = RateLimiter(source.rate_limit, source.rate_window, clock=monotonic, sleep=sleep)
+            self.limiters[name] = source.limiter = limiter
         self._tasks: dict[str, asyncio.Task] = {}
         self._wake = {name: asyncio.Event() for name in sources}
 

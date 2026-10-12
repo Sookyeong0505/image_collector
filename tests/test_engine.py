@@ -7,7 +7,7 @@ import pytest
 
 from app.collector.dedup import PhashIndex
 from app.collector.engine import Deps, run_job
-from app.collector.http import AuthFailure, HourlyLimiter, NetworkError
+from app.collector.http import AuthFailure, RateLimiter, NetworkError
 from app.collector.sources import build_sources
 from app.db import repo
 from tests.conftest import fake_naver, fake_pexels, fake_pixabay, fake_unsplash, make_image
@@ -27,7 +27,7 @@ def run(conn, settings, http, clock):
         ).fetchone()
         if cursor:
             repo.save_cursor(conn, job["id"], cursor)
-        limiter = HourlyLimiter(None, clock=clock.monotonic, sleep=clock.sleep)
+        limiter = RateLimiter(None, clock=clock.monotonic, sleep=clock.sleep)
         asyncio.run(run_job(job["id"], sources[site], limiter, deps))
         return repo.get_job(conn, job["id"])
 

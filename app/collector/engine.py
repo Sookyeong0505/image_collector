@@ -26,7 +26,7 @@ from ..config import Settings
 from ..db import repo
 from ..timeutil import to_db
 from .dedup import PhashIndex
-from .http import AuthFailure, Http, HttpError, HourlyLimiter, NetworkError, SkipError, Sleep
+from .http import AuthFailure, Http, HttpError, NetworkError, RateLimiter, SkipError, Sleep
 from .images import ImageInfo, inspect_image, relative_path, save_image
 from .sources import Source
 
@@ -48,7 +48,7 @@ class Deps:
     clock: Callable[[], datetime]
 
 
-async def run_job(job_id: int, source: Source, limiter: HourlyLimiter, deps: Deps) -> None:
+async def run_job(job_id: int, source: Source, limiter: RateLimiter, deps: Deps) -> None:
     conn = deps.conn
     job = repo.get_job(conn, job_id)
     keyword, target = job["keyword"], job["target_count"]
@@ -60,7 +60,8 @@ async def run_job(job_id: int, source: Source, limiter: HourlyLimiter, deps: Dep
         def on_wait(seconds: float) -> None:
             resume_at = deps.clock() + timedelta(seconds=seconds)
             repo.set_status(conn, job_id, "rate_limited", resume_at=to_db(resume_at))
-            log.info("[%s] API 한도 도달 — %.0f분 대기", source.name, seconds / 60)
+            log.info("[%s] API 한도 도달 — %s 대기", source.name,
+                     f"{seconds:.0f}초" if seconds < 120 else f"{seconds / 60:.0f}분")
 
         await limiter.take(on_wait, lambda: repo.set_status(conn, job_id, "running"))
 
