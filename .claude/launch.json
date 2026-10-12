@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "collector",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "app",
+        "serve",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    }
+  ]
+}

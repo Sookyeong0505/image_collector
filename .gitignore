@@ -134,3 +134,16 @@ modules.xml
 .idea/**
 /.idea/*
 
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 실행 중 생기는 데이터 (DB, 수집 이미지, 검출 결과, 로그)
+data/
+logs/
+Image/
+datasets/
+*.egg-info/

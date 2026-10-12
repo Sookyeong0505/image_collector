@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>이미지 수집기</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --line:#e3e6ea; --accent:#2563eb;
+          --ok:#15803d; --warn:#b45309; --bad:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2026; --text:#e7e9ec; --muted:#9aa1ac; --line:#2c3038; --accent:#6ea0ff;
+            --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font:15px/1.5 "Malgun Gothic", system-ui, sans-serif; }
+  main { max-width:960px; margin:0 auto; display:grid; gap:16px; }
+  h1 { font-size:20px; margin:0; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }
+  .site { display:flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid var(--line); border-radius:8px; }
+  .site small { color:var(--muted); }
+  input[type=text], input[type=number] { padding:8px 10px; border:1px solid var(--line); border-radius:8px;
+         background:var(--bg); color:var(--text); font:inherit; }
+  #keywords { flex:1 1 320px; }
+  #target { width:120px; }
+  button { padding:8px 14px; border:1px solid var(--line); border-radius:8px; background:var(--card);
+           color:var(--text); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.small { padding:2px 8px; font-size:13px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .muted { color:var(--muted); }
+  #message { min-height:1.5em; margin-top:8px; }
+  .table-wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:normal; font-size:13px; }
+  td.num { text-align:right; }
+  tr.keyword td { font-weight:bold; background:var(--bg); }
+  progress { width:120px; height:8px; vertical-align:middle; }
+  .error { white-space:normal; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row" style="justify-content:space-between">
+    <h1>이미지 수집기</h1>
+    <div class="row">
+      <span id="running" class="muted"></span>
+      <button id="toggle"></button>
+    </div>
+  </div>
+
+  <section>
+    <h2>수집 등록</h2>
+    <div id="sites" class="row" style="margin-bottom:12px"></div>
+    <div class="row">
+      <input id="keywords" type="text" placeholder="키워드 (쉼표로 구분) 예: beach, sunset">
+      <input id="target" type="number" min="1" placeholder="최대 장수">
+      <button id="submit" class="primary">실행</button>
+    </div>
+    <div id="message"></div>
+  </section>
+
+  <section>
+    <h2>진행 상황</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>사이트</th><th>상태</th><th>진행</th><th class="num">저장</th><th class="num">중복</th>
+          <th class="num">건너뜀</th><th class="num">실패</th><th>비고</th>
+        </tr></thead>
+        <tbody id="progress"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+// 화면은 서버 API 를 부르기만 한다. 수집은 서버가 하므로 이 탭을 닫아도 계속된다.
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+};
+const api = async (path, options) => {
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+  return body;
+};
+
+const STATUS = {
+  pending: ["대기", "muted"], running: ["수집 중", "ok"], rate_limited: ["한도 대기", "warn"],
+  paused: ["일시 정지", "warn"], done: ["완료", "ok"], failed: ["실패", "bad"],
+  collecting: ["수집 중", "ok"], collected: ["수집 완료", "ok"],
+};
+const say = (text, cls = "") => { $("message").textContent = text; $("message").className = cls; };
+
+// DB 의 시각은 UTC. 화면에는 내 PC 시간으로 보여 준다.
+const localTime = (utc) => new Date(utc.replace(" ", "T") + "Z").toLocaleTimeString();
+
+async function loadSites() {
+  const sites = await api("/api/sites");
+  $("sites").replaceChildren(...sites.map((site) => {
+    const box = el("input", { type: "checkbox", value: site.name, checked: site.configured, disabled: !site.configured });
+    const result = el("small", {}, site.configured ? "" : "키 없음");
+    const button = el("button", { className: "small", textContent: "연결 확인" });
+    button.onclick = async () => {
+      result.textContent = "확인 중…"; result.className = "";
+      const answer = await api(`/api/sites/${site.name}/check`, { method: "POST" });
+      result.textContent = answer.message; result.className = answer.ok ? "ok" : "bad";
+    };
+    return el("label", { className: "site" }, box, site.name, button, result);
+  }));
+}
+
+async function submit() {
+  const sites = [...document.querySelectorAll("#sites input:checked")].map((box) => box.value);
+  const target = parseInt($("target").value, 10);
+  try {
+    const answer = await api("/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keywords: $("keywords").value, sites, target_count: target > 0 ? target : null }),
+    });
+    say(`등록: ${answer.keywords.join(", ")} → ${answer.sites.join(", ")}`, "ok");
+    $("keywords").value = "";
+    refresh();
+  } catch (error) { say(error.message, "bad"); }
+}
+
+function jobRow(job) {
+  const [label, cls] = STATUS[job.status] || [job.status, ""];
+  const goal = job.target_count || job.total_available;
+  const bar = goal ? el("progress", { max: goal, value: Math.min(job.downloaded + job.duplicates, goal) }) : "";
+  let note = "";
+  if (job.resume_at && (job.status === "paused" || job.status === "rate_limited")) note = `${localTime(job.resume_at)} 재개`;
+  if (job.last_error && (job.status === "paused" || job.status === "failed")) note += ` · ${job.last_error}`;
+  const num = (value) => el("td", { className: "num", textContent: value });
+  return el("tr", {},
+    el("td", { textContent: job.site }), el("td", { className: cls, textContent: label }),
+    el("td", {}, bar, goal ? ` / ${goal}` : ""), num(job.downloaded), num(job.duplicates), num(job.skipped), num(job.errors),
+    el("td", { className: "error muted", textContent: note }));
+}
+
+async function refresh() {
+  try {
+    const data = await api("/api/progress");
+    $("running").textContent = data.running ? "수집기 동작 중" : "수집기 멈춤";
+    $("toggle").textContent = data.running ? "중단" : "재개";
+    $("toggle").onclick = async () => {
+      await api(`/api/collector/${data.running ? "stop" : "start"}`, { method: "POST" });
+      refresh();
+    };
+    const rows = data.keywords.flatMap((keyword) => {
+      const [label] = STATUS[keyword.status] || [keyword.status];
+      const head = el("tr", { className: "keyword" }, el("td", { colSpan: 8, textContent: `${keyword.keyword} — ${label}` }));
+      return [head, ...keyword.jobs.map(jobRow)];
+    });
+    $("progress").replaceChildren(...(rows.length ? rows
+      : [el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "등록된 키워드가 없습니다." }))]));
+  } catch (error) { $("running").textContent = "서버에 연결할 수 없음"; }
+}
+
+$("submit").onclick = submit;
+$("keywords").onkeydown = (event) => { if (event.key === "Enter") submit(); };
+loadSites();
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

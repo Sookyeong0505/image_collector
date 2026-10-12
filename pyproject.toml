@@ -1,0 +1,27 @@
+[project]
+name = "image-pipeline"
+version = "0.1.0"
+description = "이미지 자동 수집 + 오탐 후보 검출 파이프라인"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",          # 웹 API
+    "uvicorn",          # FastAPI 를 실행하는 서버
+    "httpx",            # 비동기 HTTP 클라이언트 (Node 의 fetch 역할)
+    "pillow",           # 이미지 검사, 지각 해시
+    "python-dotenv",    # .env 읽기
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# 저장소에 api/(Node), docs/, tests/ 등 다른 폴더가 있으므로 파이썬 패키지는 app 만이라고 알려 준다
+[tool.setuptools.packages.find]
+include = ["app*"]
