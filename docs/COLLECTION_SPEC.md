@@ -1,6 +1,7 @@
 # 이미지 수집 기능 명세
 
-Node 수집기(`api/`, `index.js`)를 Python으로 다시 만들면서 합의한 내용을 정리한 문서입니다.
+Node로 만들었던 수집기를 Python으로 다시 만들면서 합의한 내용을 정리한 문서입니다.
+이전 Node 코드는 git 기록(`554941e` 이전)에 남아 있습니다.
 검출·검수 기능은 범위 밖이며, 수집이 검출로 넘겨주는 지점(`detection_jobs`)까지만 다룹니다.
 
 ## 1. 전제와 제약
@@ -201,7 +202,7 @@ erDiagram
 | 6 | 완료 | FastAPI: 연결 확인, 작업 등록·중단, 진행률 | API 테스트 |
 | 7 | 완료 | 진행 화면 (HTML 한 장) | 브라우저에서 등록·진행률 확인 |
 | 8 | 남음 | 무인 운영: 자동 재시작 등록, 절전 해제, 하룻밤 실행 | 다음 날 아침 결과 확인 |
-| 9 | 남음 | Node 코드 제거 | — |
+| 9 | 완료 | Node 코드 제거 | — |
 
 ## 8. 실행 방법
 
@@ -247,7 +248,7 @@ app/
     └── sources/             사이트 명세 (base.py + 사이트 4개)
 ```
 
-Node 버전과의 대응: `api/lib.js` → `http.py` + `images.py`, `api/collector.js` → `engine.py`,
+이전 Node 버전과의 대응: `api/lib.js` → `http.py` + `images.py`, `api/collector.js` → `engine.py`,
 `api/sources/*.js` → `collector/sources/*.py`, `index.js` → `cli.py`. `scheduler.py`와 `db/`는 새로 생긴 부분입니다.
 
 ## 10. 구현하면서 정한 것

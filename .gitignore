@@ -1,14 +1,6 @@
 # Environment Variables (가장 중요: 실제 API 키 유출 방지)
 .env
 
-# Node.js Dependencies
-node_modules/
-
-# Log files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
 # OS generated files
 .DS_Store
 .DS_Store?
