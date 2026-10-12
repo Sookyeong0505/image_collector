@@ -85,6 +85,19 @@ def test_중단하고_재개할_수_있다(client):
     assert client.post("/api/collector/start").json() == {"running": True}
 
 
+def test_상태_확인(client, web):
+    fake_pexels(web, {1: [1]})
+    web.images({"/p1": make_image(1)})
+
+    idle = client.get("/api/health").json()
+    assert idle == {"status": "ok", "scheduler_running": True, "unfinished_jobs": 0,
+                    "keep_awake": False, "last_saved_at": None}
+
+    client.post("/api/jobs", json={"keywords": "beach", "sites": ["pexels"]})
+    done = wait_until(lambda: (h := client.get("/api/health").json())["last_saved_at"] and h["unfinished_jobs"] == 0 and h)
+    assert done["keep_awake"] is False      # 다 끝났으므로 절전 방지 해제
+
+
 def test_화면이_열린다(client):
     page = client.get("/")
     assert page.status_code == 200 and "이미지 수집기" in page.text

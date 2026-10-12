@@ -94,6 +94,45 @@ copy .env.sample .env
 
 끝난 키워드를 다시 등록하면 처음부터 다시 훑어 그사이 새로 올라온 사진만 받습니다.
 
+## 무인 운영 (자동 시작)
+
+PC가 켜지면 서버가 자동으로 시작되고, 비정상 종료되면 다시 뜨도록 Windows 작업 스케줄러에 등록할 수 있습니다.
+로그인하지 않은 상태에서도 실행되므로, 밤사이 Windows 업데이트로 재부팅돼도 수집이 이어집니다.
+
+직접 띄운 서버가 있으면 먼저 종료한 뒤, **관리자 권한 PowerShell**에서 실행합니다.
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
+```
+
+| 동작 | 내용 |
+|---|---|
+| 시작 | 부팅 1분 뒤 자동 시작. 로그인 불필요 |
+| 재시작 | 서버가 비정상 종료되면 1분 뒤 다시 시작하고, 멈춘 자리부터 이어서 수집 |
+| 절전 | 남은 작업이 있는 동안 PC가 절전에 들어가지 않음. 다 끝나면 평소 전원 설정대로 동작 |
+| 화면 | 창 없이 백그라운드로 실행. 로그인 후 브라우저에서 http://127.0.0.1:8000 접속 |
+| 암호 | Windows 암호를 저장하지 않음 |
+
+| 하고 싶은 일 | 명령 (관리자 PowerShell) |
+|---|---|
+| 상태 보기 | `Get-ScheduledTask -TaskName ImageCollector` |
+| 잠시 멈추기 | `Stop-ScheduledTask -TaskName ImageCollector` |
+| 다시 시작 | `Start-ScheduledTask -TaskName ImageCollector` |
+| 제거 | `powershell -ExecutionPolicy Bypass -File scripts\uninstall-autostart.ps1` |
+
+**아침에 확인하는 방법**
+
+1. http://127.0.0.1:8000 에서 사이트별 진행 상황과 `일시 정지` / `실패` 상태의 비고를 봅니다.
+2. http://127.0.0.1:8000/api/health 에서 서버가 살아 있는지, 마지막으로 이미지를 저장한 시각(UTC)을 봅니다.
+3. `logs\collector.log`에서 `ERROR`를 찾습니다.
+
+**제약**
+
+- 프로젝트 폴더와 이미지 저장 폴더가 로컬 디스크에 있어야 합니다. 이 방식은 네트워크 드라이브에 접근하지 못합니다.
+- 로그인 전에는 Wi-Fi가 연결되지 않는 PC가 있습니다. 유선 랜에서는 문제없습니다.
+- 노트북 덮개를 닫거나 전원 버튼으로 절전시키는 것은 막지 못합니다.
+- 작업으로 실행 중일 때는 같은 포트로 `python -m app serve`를 또 띄울 수 없습니다.
+
 ## 결과물이 저장되는 곳
 
 | 위치 | 내용 |
@@ -116,6 +155,7 @@ DB 내용은 [DB Browser for SQLite](https://sqlitebrowser.org/) 같은 도구�
 | GET | `/api/progress` | 키워드별·사이트별 진행 상황 |
 | POST | `/api/collector/stop` | 수집 일시 중단 |
 | POST | `/api/collector/start` | 수집 재개 |
+| GET | `/api/health` | 서버 상태 (스케줄러 동작 여부, 남은 작업 수, 절전 방지 여부, 마지막 저장 시각) |
 
 ## 프로젝트 구조
 
@@ -126,6 +166,7 @@ app/
 ├── runtime.py               부품 조립 (DB 연결, HTTP 클라이언트, 사이트 명세, 스케줄러)
 ├── config.py                .env → Settings
 ├── logging_setup.py         콘솔 + 파일 로그 설정
+├── keep_awake.py            남은 작업이 있는 동안 절전 방지
 ├── timeutil.py              UTC 시각 ↔ DB 문자열 변환
 ├── static/index.html        진행 화면
 ├── db/
@@ -139,6 +180,7 @@ app/
     ├── images.py            이미지 검사, 해시 계산, 파일 저장
     ├── dedup.py             지각 해시 색인
     └── sources/             사이트 명세 (base.py + unsplash, pexels, pixabay, naver)
+scripts/                     자동 시작 등록·제거 스크립트 (PowerShell)
 tests/                       가짜 웹·가짜 시계 기반 테스트
 docs/COLLECTION_SPEC.md      설계 문서 (기능, 데이터 흐름, 스키마, 결정 사항)
 ```
@@ -191,6 +233,5 @@ flowchart TB
 
 ## 앞으로 할 일
 
-- 무인 운영 설정: PC를 켤 때 서버 자동 시작, 비정상 종료 시 재시작
 - 오탐 후보 검출: YOLO 검출 → crop 저장 → 분류기 참고 판정 (별도 워커 프로세스)
 - 검수 화면

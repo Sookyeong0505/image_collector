@@ -10,6 +10,7 @@
     GET  /api/progress            키워드별·사이트별 진행 상황
     POST /api/collector/stop      수집 일시 중단
     POST /api/collector/start     수집 재개
+    GET  /api/health              서버 상태 (살아 있는지, 수집 중인지)
     GET  /docs                    API 문서 (자동 생성)
 
 엔드포인트는 모두 async def 로 둔다. 수집 태스크와 같은 스레드에서 실행되므로
@@ -98,6 +99,18 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def progress(request: Request):
         runtime = runtime_of(request)
         return {"running": runtime.scheduler.running, "keywords": repo.progress(runtime.conn)}
+
+    @app.get("/api/health")
+    async def health(request: Request):
+        """무인 운영 중 '지금 제대로 돌고 있나'를 한눈에 확인한다."""
+        runtime = runtime_of(request)
+        return {
+            "status": "ok",
+            "scheduler_running": runtime.scheduler.running,
+            "unfinished_jobs": repo.count_unfinished_jobs(runtime.conn),
+            "keep_awake": runtime.scheduler.keep_awake.active,
+            "last_saved_at": repo.last_saved_at(runtime.conn),   # UTC
+        }
 
     @app.post("/api/collector/stop")
     async def stop(request: Request):

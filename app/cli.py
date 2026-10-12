@@ -10,6 +10,7 @@
 
 import argparse
 import asyncio
+import os
 import sys
 
 from .config import Settings
@@ -38,8 +39,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
+    # pythonw 로 실행하면 표준 출력이 아예 없다(None). 출력하려는 코드가 죽지 않게 버리는 곳으로 연결한다.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout.reconfigure(errors="replace")
 
     if args.command == "serve":
         import uvicorn

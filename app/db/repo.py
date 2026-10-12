@@ -82,6 +82,18 @@ def earliest_resume(conn: sqlite3.Connection, site: str) -> str | None:
     ).fetchone()[0]
 
 
+def count_unfinished_jobs(conn: sqlite3.Connection) -> int:
+    """아직 끝나지 않은 작업 수 (대기·수집 중·한도 대기·일시 정지)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM collect_jobs WHERE status NOT IN ('done', 'failed')"
+    ).fetchone()[0]
+
+
+def last_saved_at(conn: sqlite3.Connection) -> str | None:
+    """마지막으로 이미지를 저장한 시각(UTC). 수집이 실제로 진행 중인지 가늠하는 데 쓴다."""
+    return conn.execute("SELECT MAX(created_at) FROM images WHERE path IS NOT NULL").fetchone()[0]
+
+
 def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row:
     return conn.execute(
         f"SELECT {_JOB_COLUMNS} FROM collect_jobs j JOIN keywords k ON k.id = j.keyword_id WHERE j.id = ?",

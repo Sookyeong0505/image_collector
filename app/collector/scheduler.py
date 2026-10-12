@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 
 from ..config import Settings
 from ..db import repo
+from ..keep_awake import KeepAwake
 from ..timeutil import from_db, to_db, utcnow
 from .dedup import PhashIndex
 from .engine import Deps, run_job
@@ -36,12 +37,13 @@ log = logging.getLogger(__name__)
 class Scheduler:
     def __init__(self, conn: sqlite3.Connection, settings: Settings, sources: dict[str, Source], http: Http, *,
                  clock: Callable[[], datetime] = utcnow, sleep: Sleep = asyncio.sleep,
-                 monotonic: Callable[[], float] = time.monotonic):
+                 monotonic: Callable[[], float] = time.monotonic, keep_awake: KeepAwake | None = None):
         self.conn = conn
         self.settings = settings
         self.sources = sources          # 키가 설정된 사이트만 넘겨받는다
         self.clock = clock
         self.sleep = sleep
+        self.keep_awake = keep_awake or KeepAwake()
 
         self.deps = Deps(conn, settings, http, PhashIndex.load(conn, settings.phash_threshold), sleep, clock)
 
@@ -72,6 +74,7 @@ class Scheduler:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self.keep_awake.update(False)   # 사용자가 멈췄으니 PC 가 절전에 들어가도 된다
 
     @property
     def running(self) -> bool:
@@ -86,6 +89,10 @@ class Scheduler:
 
     async def _site_loop(self, site: str, exit_when_idle: bool) -> None:
         while True:
+            # 작업을 하나 끝낼 때마다, 그리고 잠들기 직전에 여기를 지난다.
+            # 쉬는 작업(1시간 뒤 재개)도 '남은 작업'이므로 그동안 PC 는 깨어 있다.
+            self.keep_awake.update(repo.count_unfinished_jobs(self.conn) > 0)
+
             now = self.clock()
             job = repo.next_runnable_job(self.conn, site, to_db(now))
             if job is not None:

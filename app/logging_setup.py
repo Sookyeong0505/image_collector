@@ -19,13 +19,13 @@ def setup_logging(log_dir: Path = PROJECT_ROOT / "logs") -> None:
     )
 
     # Windows 콘솔(cp949)이 표현하지 못하는 문자가 섞여도 로그 때문에 죽지 않게 한다
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(errors="replace")
+    handlers: list[logging.Handler] = [file_handler]
+    if sys.stderr is not None:   # pythonw 로 실행하면(자동 시작) 콘솔이 없다. 그때는 파일에만 남긴다
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(errors="replace")
+        handlers.append(logging.StreamHandler())
 
-    logging.basicConfig(
-        level=logging.INFO, format=_FORMAT, datefmt="%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(), file_handler], force=True,
-    )
+    logging.basicConfig(level=logging.INFO, format=_FORMAT, datefmt="%m-%d %H:%M:%S", handlers=handlers, force=True)
 
     # httpx 는 요청마다 전체 URL 을 INFO 로 찍는다. Pixabay 는 URL 에 API 키가 들어 있으므로 꺼 둔다.
     logging.getLogger("httpx").setLevel(logging.WARNING)
