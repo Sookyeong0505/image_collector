@@ -89,7 +89,7 @@ def test_한_사이트만_끝난_키워드는_아직_검출하지_않는다(make
 # ── 에러 대응 ───────────────────────────────────────────────────────
 
 
-def test_심각한_에러는_1시간_쉬었다가_커서부터_다시_한다(make_scheduler, web, conn, clock):
+def test_심각한_에러는_10분_쉬었다가_커서부터_다시_한다(make_scheduler, web, conn, clock):
     broken = {"on": True}
 
     def pexels(request):
@@ -105,7 +105,7 @@ def test_심각한_에러는_1시간_쉬었다가_커서부터_다시_한다(mak
     seen = {}
 
     def on_sleep(seconds):
-        if seconds > 3000:                      # 1시간 대기에 들어가는 순간
+        if seconds > 500:                       # 10분 대기에 들어가는 순간
             seen.update(jobs(conn)[("beach", "pexels")])
             broken["on"] = False                # 쉬는 동안 서버가 복구됨
     clock.on_sleep = on_sleep
@@ -113,7 +113,7 @@ def test_심각한_에러는_1시간_쉬었다가_커서부터_다시_한다(mak
     asyncio.run(make_scheduler("pexels").run_until_idle())
 
     assert seen["status"] == "paused" and seen["cursor"] == "2" and "503" in seen["last_error"]
-    assert 3590 <= (from_db(seen["resume_at"]) - started).total_seconds() <= 3610
+    assert 590 <= (from_db(seen["resume_at"]) - started).total_seconds() <= 610
 
     job = jobs(conn)[("beach", "pexels")]
     assert job["status"] == "done" and job["downloaded"] == 2
@@ -151,7 +151,7 @@ def test_한_작업이_쉬는_동안_다음_키워드로_넘어간다(make_sched
 
     asyncio.run(make_scheduler("pexels").run_until_idle())
 
-    # beach 실패(재시도 1회 포함 2번) → 기다리지 않고 sunset → 1시간 뒤 beach
+    # beach 실패(재시도 1회 포함 2번) → 기다리지 않고 sunset → 10분 뒤 beach
     assert searched_keywords(web, "api.pexels.com") == ["beach", "beach", "sunset", "beach"]
     assert {job["status"] for job in jobs(conn).values()} == {"done"}
 

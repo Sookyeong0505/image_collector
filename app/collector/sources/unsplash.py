@@ -69,5 +69,5 @@ class Unsplash(Source):
 
     def is_auth_error(self, err: HttpError) -> bool:
         if err.status == 403 and "rate limit" in err.body.lower():
-            return False  # 한도 초과 — 스케줄러가 1시간 쉬게 둔다
+            return False  # 한도 초과 — 스케줄러가 10분 쉬게 둔다
         return err.status in (401, 403)

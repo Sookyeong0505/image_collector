@@ -64,7 +64,7 @@ def redact_url(url: str) -> str:
 # ── 재시도 GET ──────────────────────────────────────────────────────
 
 _RETRYABLE_STATUS = {408, 425, 429}
-_MAX_RETRY_AFTER = 60  # 서버가 이보다 오래 기다리라고 하면 재시도 대신 에러로 올린다 (스케줄러가 1시간 쉼)
+_MAX_RETRY_AFTER = 60  # 서버가 이보다 오래 기다리라고 하면 재시도 대신 에러로 올린다 (스케줄러가 10분 쉼)
 
 
 def _backoff(attempt: int) -> float:

@@ -11,7 +11,7 @@
 
     정상 종료        → done
     AuthFailure     → paused (1시간 뒤 재시도), 3번째에 failed
-    그 밖의 예외     → paused (1시간 뒤 재시도, 횟수 제한 없음)
+    그 밖의 예외     → paused (10분 뒤 재시도, 횟수 제한 없음)
     중단 요청        → pending (커서가 저장돼 있어 다음에 이어서 한다)
 """
 
@@ -91,7 +91,7 @@ class Scheduler:
     async def _site_loop(self, site: str, exit_when_idle: bool) -> None:
         while True:
             # 작업을 하나 끝낼 때마다, 그리고 잠들기 직전에 여기를 지난다.
-            # 쉬는 작업(1시간 뒤 재개)도 '남은 작업'이므로 그동안 PC 는 깨어 있다.
+            # 쉬는 작업(10분·1시간 뒤 재개)도 '남은 작업'이므로 그동안 PC 는 깨어 있다.
             self.keep_awake.update(repo.count_unfinished_jobs(self.conn) > 0)
 
             now = self.clock()
@@ -140,11 +140,11 @@ class Scheduler:
             else:
                 log.error("%s 인증 오류 (%d/%d) — 1시간 뒤 재시도: %s",
                           label, failures, self.settings.max_auth_failures, err)
-                self._pause(job_id, err)
+                self._pause(job_id, err, self.settings.auth_pause_seconds)
 
         except Exception as err:  # 무인 운영이 목적이므로 어떤 에러든 태스크를 죽이지 않고 쉬었다 다시 한다
-            log.exception("%s 오류 — 1시간 뒤 재시도: %s", label, err)
-            self._pause(job_id, err)
+            log.exception("%s 오류 — 10분 뒤 재시도: %s", label, err)
+            self._pause(job_id, err, self.settings.pause_seconds)
 
         else:
             repo.set_status(conn, job_id, "done", finished_at=to_db(self.clock()))
@@ -154,7 +154,7 @@ class Scheduler:
         if repo.complete_keyword_if_finished(conn, job["keyword_id"]):
             log.info("'%s' 수집 완료 — 검출 작업 등록", job["keyword"])
 
-    def _pause(self, job_id: int, err: Exception) -> None:
-        resume_at = self.clock() + timedelta(seconds=self.settings.pause_seconds)
+    def _pause(self, job_id: int, err: Exception, seconds: int) -> None:
+        resume_at = self.clock() + timedelta(seconds=seconds)
         repo.set_status(self.conn, job_id, "paused", resume_at=to_db(resume_at),
                         last_error=f"{type(err).__name__}: {err}")

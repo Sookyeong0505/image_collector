@@ -41,21 +41,21 @@ def test_수집하는_동안_켜지고_끝나면_꺼진다(conn, settings, http,
     assert calls == [AWAKE, NORMAL]
 
 
-def test_1시간_쉬는_작업이_있으면_그동안_깨어_있다(conn, settings, http, clock, web):
+def test_쉬는_작업이_있으면_그동안_깨어_있다(conn, settings, http, clock, web):
     import httpx
-    answers = iter([httpx.Response(503), httpx.Response(503)])   # 첫 시도와 자동 재시도가 실패 → 1시간 정지
+    answers = iter([httpx.Response(503), httpx.Response(503)])   # 첫 시도와 자동 재시도가 실패 → 10분 정지
     web.route("api.pexels.com", lambda request: next(answers, httpx.Response(200, json={"photos": []})))
     repo.add_keywords(conn, ["beach"], ["pexels"], None)
     keep_awake = KeepAwake(lambda state: None)
     while_paused = []
-    clock.on_sleep = lambda seconds: while_paused.append(keep_awake.active) if seconds > 3000 else None
+    clock.on_sleep = lambda seconds: while_paused.append(keep_awake.active) if seconds > 500 else None
     sources = {"pexels": build_sources(settings)["pexels"]}
     scheduler = Scheduler(conn, settings, sources, http, clock=clock.now, sleep=clock.sleep,
                           monotonic=clock.monotonic, keep_awake=keep_awake)
 
     asyncio.run(scheduler.run_until_idle())
 
-    assert while_paused == [True]          # 쉬는 동안에도 PC 를 깨워 둬야 1시간 뒤에 재개할 수 있다
+    assert while_paused == [True]          # 쉬는 동안에도 PC 를 깨워 둬야 10분 뒤에 재개할 수 있다
     assert keep_awake.active is False      # 다 끝나면 해제
 
 

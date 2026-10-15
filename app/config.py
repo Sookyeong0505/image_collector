@@ -27,7 +27,8 @@ class Settings:
     timeout: float                  # 요청 1건당 타임아웃(초)
     max_retries: int                # 네트워크 오류 재시도 횟수
     phash_threshold: int            # 지각 해시가 이 비트 수 이하로 다르면 같은 이미지로 본다
-    pause_seconds: int = 3600       # 심각한 에러 후 쉬는 시간
+    pause_seconds: int = 600        # 심각한 에러 후 쉬는 시간 (10분)
+    auth_pause_seconds: int = 3600  # 인증 오류 후 쉬는 시간 (1시간). 키 문제는 금방 풀리지 않아 길게 둔다
     max_auth_failures: int = 3      # 인증 오류가 이만큼 쌓이면 작업을 실패 처리
     env: Mapping[str, str] = field(default_factory=dict, repr=False)  # 사이트 명세가 자기 키를 꺼내 쓴다
 
