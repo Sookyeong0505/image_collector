@@ -41,10 +41,19 @@
   .ratio { margin-left:6px; font-size:13px; }
   #limit { margin-top:8px; font-size:13px; }
   .error { white-space:normal; font-size:13px; }
-  .lists { display:grid; grid-template-columns:3fr 2fr; gap:16px; }
-  @media (max-width:720px) { .lists { grid-template-columns:1fr; } }
-  .lists > div { min-width:0; }
-  h3 { font-size:13px; font-weight:normal; color:var(--muted); margin:0 0 8px; }
+  .tabs { display:flex; flex-wrap:wrap; gap:4px; border-bottom:1px solid var(--line); margin:0 0 12px; }
+  .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; background:none;
+                 color:var(--muted); padding:6px 12px; margin-bottom:-1px; }
+  .tabs button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); font-weight:bold; }
+  .tabs button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .count { display:inline-block; min-width:1.6em; margin-left:4px; padding:0 6px; border-radius:999px;
+           background:var(--bg); color:var(--muted); font-size:12px; font-weight:normal; font-variant-numeric:tabular-nums; }
+  .hint { font-size:13px; color:var(--muted); margin:0 0 8px; }
+  .pager { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-top:12px; font-variant-numeric:tabular-nums; }
+  .pager .total { margin-right:auto; font-size:13px; color:var(--muted); }
+  .pager button { min-width:2.2em; padding:2px 8px; font-size:13px; }
+  .pager button[aria-current="page"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .pager .gap { color:var(--muted); padding:0 2px; }
   ol.keywords { list-style:none; margin:0; padding:0; border-top:1px solid var(--line); counter-reset:kw; }
   ol.keywords li { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; padding:6px 0;
                    border-bottom:1px solid var(--line); counter-increment:kw; font-variant-numeric:tabular-nums; }
@@ -81,21 +90,27 @@
 
   <section>
     <h2>키워드 목록</h2>
-    <div class="lists">
-      <div>
-        <h3>수집 예약 · 위에서부터 차례로 수집합니다</h3>
-        <ol id="queued" class="keywords"></ol>
-      </div>
-      <div>
-        <h3>수집 완료 · 끝난 순서</h3>
-        <ol id="collected" class="keywords"></ol>
-      </div>
+    <div class="tabs" role="tablist" data-group="list">
+      <button id="tab-list-queued" role="tab" data-tab="queued" aria-controls="panel-list-queued">수집 중<span class="count" id="count-list-queued"></span></button>
+      <button id="tab-list-collected" role="tab" data-tab="collected" aria-controls="panel-list-collected">수집 완료<span class="count" id="count-list-collected"></span></button>
+    </div>
+    <div id="panel-list-queued" role="tabpanel" data-group="list" data-tab="queued" aria-labelledby="tab-list-queued">
+      <p class="hint">위에서부터 차례로 수집합니다. 보류한 키워드는 건너뜁니다.</p>
+      <ol id="queued" class="keywords"></ol>
+    </div>
+    <div id="panel-list-collected" role="tabpanel" data-group="list" data-tab="collected" aria-labelledby="tab-list-collected" hidden>
+      <p class="hint">수집을 마친 순서입니다.</p>
+      <ol id="collected" class="keywords"></ol>
     </div>
   </section>
 
-  <section>
+  <section id="progress-card">
     <h2>진행 상황</h2>
-    <div class="table-wrap">
+    <div class="tabs" role="tablist" data-group="progress">
+      <button id="tab-progress-active" role="tab" data-tab="active" aria-controls="progress-panel">진행 상황<span class="count" id="count-progress-active"></span></button>
+      <button id="tab-progress-collected" role="tab" data-tab="collected" aria-controls="progress-panel">수집 완료<span class="count" id="count-progress-collected"></span></button>
+    </div>
+    <div id="progress-panel" class="table-wrap" role="tabpanel">
       <table>
         <thead><tr>
           <th>사이트</th><th>상태</th><th title="확인한 장수 / 사이트에서 받을 수 있는 전체 장수">진행</th><th class="num">저장</th><th class="num">중복</th>
@@ -104,6 +119,7 @@
         <tbody id="progress"></tbody>
       </table>
     </div>
+    <nav id="pager" class="pager" aria-label="진행 상황 페이지"></nav>
   </section>
 </main>
 
@@ -127,6 +143,59 @@ const STATUS = {
   paused: ["일시 정지", "warn"], done: ["완료", "ok"], failed: ["실패", "bad"],
   collecting: ["수집 중", "ok"], collected: ["수집 완료", "ok"],
 };
+// 화면 상태: 고른 탭과 탭별 페이지. 탭은 브라우저에 기억해 새로고침해도 유지한다.
+const PAGE_SIZE = 20;   // 진행 상황 한 페이지에 보여 줄 키워드 수
+const remember = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
+const view = {
+  list: remember("tab:list", "queued"),
+  progress: remember("tab:progress", "active"),
+  page: { active: 1, collected: 1 },
+};
+let lastData = null;   // 탭·페이지를 바꿀 때 서버를 다시 부르지 않고 바로 다시 그린다
+
+function showTabs() {
+  for (const tab of document.querySelectorAll("[role=tab]")) {
+    const group = tab.closest("[data-group]").dataset.group;
+    const selected = view[group] === tab.dataset.tab;
+    tab.setAttribute("aria-selected", selected);
+    tab.tabIndex = selected ? 0 : -1;
+  }
+  for (const panel of document.querySelectorAll("[role=tabpanel][data-group]")) {
+    panel.hidden = view[panel.dataset.group] !== panel.dataset.tab;
+  }
+  $("progress-panel").setAttribute("aria-labelledby", `tab-progress-${view.progress}`);
+}
+
+for (const tab of document.querySelectorAll("[role=tab]")) {
+  tab.onclick = () => {
+    const group = tab.closest("[data-group]").dataset.group;
+    view[group] = tab.dataset.tab;
+    try { localStorage.setItem(`tab:${group}`, view[group]); } catch {}
+    showTabs();
+    if (lastData) render(lastData);
+  };
+}
+
+function pagerButtons(page, pages) {
+  // 1 … 4 5 [6] 7 8 … 20 처럼 양 끝과 현재 주변만 보여 준다
+  const shown = [...new Set([1, pages, page - 2, page - 1, page, page + 1, page + 2])]
+    .filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const go = (n) => () => {
+    view.page[view.progress] = n;
+    render(lastData);
+    $("progress-card").scrollIntoView({ block: "nearest" });
+  };
+  const items = [button("‹ 이전", "이전 페이지", go(page - 1), { disabled: page === 1, className: "" })];
+  shown.forEach((n, i) => {
+    if (i && n - shown[i - 1] > 1) items.push(el("span", { className: "gap", textContent: "…" }));
+    const b = button(String(n), `${n}페이지`, go(n), { className: "" });
+    if (n === page) b.setAttribute("aria-current", "page");
+    items.push(b);
+  });
+  items.push(button("다음 ›", "다음 페이지", go(page + 1), { disabled: page === pages, className: "" }));
+  return items;
+}
+
 const say = (text, cls = "") => { $("message").textContent = text; $("message").className = cls; };
 
 // DB 의 시각은 UTC. 화면에는 내 PC 시간으로 보여 준다.
@@ -204,10 +273,16 @@ function collectedItem(keyword) {
     el("span", { className: "meta muted", textContent: keyword.finished_at ? localDateTime(keyword.finished_at) : "" }));
 }
 
-function renderKeywordLists(keywords) {
-  const queued = keywords.filter((keyword) => keyword.status !== "collected");   // 서버가 수집 순서대로 준다
-  const collected = keywords.filter((keyword) => keyword.status === "collected")
-    .sort((a, b) => (a.finished_at || "").localeCompare(b.finished_at || ""));
+// 수집 중(대기·보류 포함)은 서버가 준 수집 순서 그대로, 수집 완료는 끝난 순서로
+const split = (keywords) => ({
+  queued: keywords.filter((keyword) => keyword.status !== "collected"),
+  collected: keywords.filter((keyword) => keyword.status === "collected")
+    .sort((a, b) => (a.finished_at || "").localeCompare(b.finished_at || "")),
+});
+
+function renderKeywordLists({ queued, collected }) {
+  $("count-list-queued").textContent = queued.length;
+  $("count-list-collected").textContent = collected.length;
   const empty = (text) => el("li", { className: "empty", textContent: text });
   $("queued").replaceChildren(...(queued.length ? queued.map((k, i) => queuedItem(k, i, queued)) : [empty("예약된 키워드가 없습니다.")]));
   $("collected").replaceChildren(...(collected.length ? collected.map(collectedItem) : [empty("아직 수집을 마친 키워드가 없습니다.")]));
@@ -244,18 +319,46 @@ async function refresh() {
       await api(`/api/collector/${data.running ? "stop" : "start"}`, { method: "POST" });
       refresh();
     };
-    renderKeywordLists(data.keywords);
-    const rows = data.keywords.flatMap((keyword) => {
-      const [label] = STATUS[keyword.status] || [keyword.status];
-      const held = keyword.held ? " · 보류" : "";
-      const head = el("tr", { className: "keyword" }, el("td", { colSpan: 8, textContent: `${keyword.keyword} — ${label}${held}` }));
-      return [head, ...keyword.jobs.map(jobRow)];
-    });
-    $("progress").replaceChildren(...(rows.length ? rows
-      : [el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: "등록된 키워드가 없습니다." }))]));
+    lastData = data;
+    render(data);
   } catch (error) { $("running").textContent = "서버에 연결할 수 없음"; }
 }
 
+function renderProgress({ queued, collected }) {
+  $("count-progress-active").textContent = queued.length;
+  $("count-progress-collected").textContent = collected.length;
+
+  const tab = view.progress;
+  const keywords = tab === "active" ? queued : collected;
+  const pages = Math.max(1, Math.ceil(keywords.length / PAGE_SIZE));
+  const page = view.page[tab] = Math.min(Math.max(view.page[tab], 1), pages);   // 키워드가 줄어 페이지가 사라진 경우
+  const start = (page - 1) * PAGE_SIZE;
+
+  const rows = keywords.slice(start, start + PAGE_SIZE).flatMap((keyword) => {
+    const [label] = STATUS[keyword.status] || [keyword.status];
+    const held = keyword.held ? " · 보류" : "";
+    const finished = keyword.finished_at ? ` · ${localDateTime(keyword.finished_at)}` : "";
+    const head = el("tr", { className: "keyword" },
+      el("td", { colSpan: 8, textContent: `${keyword.keyword} — ${label}${held}${finished}` }));
+    return [head, ...keyword.jobs.map(jobRow)];
+  });
+  const empty = tab === "active" ? "진행 중인 키워드가 없습니다." : "아직 수집을 마친 키워드가 없습니다.";
+  $("progress").replaceChildren(...(rows.length ? rows
+    : [el("tr", {}, el("td", { colSpan: 8, className: "muted", textContent: empty }))]));
+
+  const range = keywords.length ? `${start + 1}–${Math.min(start + PAGE_SIZE, keywords.length)}` : "0";
+  $("pager").replaceChildren(
+    el("span", { className: "total", textContent: `키워드 ${keywords.length.toLocaleString()}개 중 ${range}` }),
+    ...(pages > 1 ? pagerButtons(page, pages) : []));
+}
+
+function render(data) {
+  const groups = split(data.keywords);
+  renderKeywordLists(groups);
+  renderProgress(groups);
+}
+
+showTabs();
 $("submit").onclick = submit;
 $("keywords").onkeydown = (event) => { if (event.key === "Enter") submit(); };
 loadSites();
