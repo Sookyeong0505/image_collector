@@ -74,6 +74,25 @@ def set_held(conn: sqlite3.Connection, keyword_id: int, held: bool) -> None:
     conn.commit()
 
 
+def finish_keyword(conn: sqlite3.Connection, keyword_id: int, now: str) -> bool:
+    """남은 사이트 작업을 모두 끝난 것(done)으로 바꾸고 키워드를 수집 완료로 옮긴다.
+
+    사용자가 '이 정도면 됐다'고 판단해 수집을 마칠 때 쓴다. 이미 받은 이미지는 그대로 두고,
+    수집 완료가 되면 다른 키워드처럼 검출 작업이 등록된다.
+    """
+    conn.execute(
+        """
+        UPDATE collect_jobs SET status = 'done', resume_at = NULL, finished_at = ?,
+            last_error = '수동 완료'
+        WHERE keyword_id = ? AND status NOT IN ('done', 'failed')
+        """,
+        (now, keyword_id),
+    )
+    conn.execute("UPDATE keywords SET held = 0 WHERE id = ?", (keyword_id,))
+    conn.commit()
+    return complete_keyword_if_finished(conn, keyword_id)
+
+
 def delete_keyword(conn: sqlite3.Connection, keyword_id: int) -> None:
     """키워드와 그 수집 작업·출처 기록을 지운다 (외래키 CASCADE).
 

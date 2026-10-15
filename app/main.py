@@ -12,6 +12,7 @@
     POST /api/keywords/{id}/hold  예약 키워드 보류
     POST /api/keywords/{id}/resume 보류 풀기
     DELETE /api/keywords/{id}     예약 키워드 삭제 (받은 이미지 파일은 남는다)
+    POST /api/keywords/{id}/complete 수집을 여기서 마치고 수집 완료로 옮기기
     POST /api/collector/stop      수집 일시 중단
     POST /api/collector/start     수집 재개
     GET  /api/health              서버 상태 (살아 있는지, 수집 중인지)
@@ -35,6 +36,7 @@ from .db import repo
 from .instance_lock import AlreadyRunning
 from .logging_setup import setup_logging
 from .runtime import Runtime, check_source, open_runtime, parse_keywords
+from .timeutil import to_db
 
 INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 
@@ -163,6 +165,16 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         runtime.scheduler.wake()
         logging.getLogger(__name__).info("'%s' 보류 해제", keyword["text"])
         return {"id": keyword_id, "held": False}
+
+    @app.post("/api/keywords/{keyword_id}/complete")
+    async def complete_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = queued_keyword(runtime, keyword_id)
+        repo.set_held(runtime.conn, keyword_id, True)          # 먼저 보류해 다시 집어 들지 않게 한 뒤
+        await runtime.scheduler.release_keyword(keyword_id)   # 수집 중인 작업을 멈추고 (멈춘 작업은 pending 이 된다)
+        repo.finish_keyword(runtime.conn, keyword_id, to_db(runtime.scheduler.clock()))   # 남은 작업을 끝낸다
+        logging.getLogger(__name__).info("'%s' 수동 완료 — 검출 작업 등록", keyword["text"])
+        return {"id": keyword_id, "status": "collected"}
 
     @app.delete("/api/keywords/{keyword_id}")
     async def delete_keyword(keyword_id: int, request: Request):

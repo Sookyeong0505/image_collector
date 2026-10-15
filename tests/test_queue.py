@@ -158,3 +158,37 @@ def test_수집을_마친_키워드는_보류하거나_지울_수_없다(setting
         assert keyword["finished_at"] is not None
         assert client.post(f"/api/keywords/{keyword['id']}/hold").status_code == 409
         assert client.delete(f"/api/keywords/{keyword['id']}").status_code == 409
+
+
+def test_완료하면_남은_작업을_끝내고_수집_완료로_옮겨_검출을_등록한다(conn):
+    repo.add_keywords(conn, ["beach"], ["pexels", "pixabay", "naver"], None)
+    keyword_id = ids_of(conn)["beach"]
+    conn.execute("UPDATE collect_jobs SET status = 'done', finished_at = '2026-01-01 00:00:00' WHERE site = 'pexels'")
+    conn.execute("UPDATE collect_jobs SET status = 'failed' WHERE site = 'pixabay'")
+    conn.execute("UPDATE collect_jobs SET status = 'paused', resume_at = '2026-01-01 01:00:00' WHERE site = 'naver'")
+    repo.set_held(conn, keyword_id, True)
+
+    assert repo.finish_keyword(conn, keyword_id, "2026-01-01 00:30:00") is True
+
+    rows = {row["site"]: row for row in conn.execute("SELECT * FROM collect_jobs")}
+    assert {site: row["status"] for site, row in rows.items()} == {"pexels": "done", "pixabay": "failed", "naver": "done"}
+    assert rows["naver"]["finished_at"] == "2026-01-01 00:30:00" and rows["naver"]["resume_at"] is None
+    assert rows["pexels"]["finished_at"] == "2026-01-01 00:00:00"      # 이미 끝난 작업은 건드리지 않는다
+    keyword = repo.get_keyword(conn, keyword_id)
+    assert (keyword["status"], keyword["held"]) == ("collected", 0)
+    assert conn.execute("SELECT COUNT(*) FROM detection_jobs").fetchone()[0] == 1
+
+
+def test_수집_중인_키워드를_API로_완료한다(settings, web):
+    app = create_app(dataclasses.replace(settings), httpx.MockTransport(web))
+    with TestClient(app) as client:
+        client.post("/api/collector/stop")
+        client.post("/api/jobs", json={"keywords": "beach", "sites": ["pexels"]})
+        keyword_id = client.get("/api/progress").json()["keywords"][0]["id"]
+
+        assert client.post(f"/api/keywords/{keyword_id}/complete").json() == {"id": keyword_id, "status": "collected"}
+        keyword = client.get("/api/progress").json()["keywords"][0]
+
+        assert keyword["status"] == "collected" and keyword["finished_at"] is not None
+        assert keyword["jobs"][0]["status"] == "done"
+        assert client.post(f"/api/keywords/{keyword_id}/complete").status_code == 409   # 이미 완료
