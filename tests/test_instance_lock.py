@@ -3,6 +3,7 @@
 import asyncio
 import subprocess
 import sys
+import time
 
 import httpx
 import pytest
@@ -42,8 +43,17 @@ def test_프로세스가_강제_종료되면_잠금이_저절로_풀린다(tmp_p
         holder.kill()                              # 정리할 틈 없이 강제 종료
         holder.wait()
 
+    # 잠금 파일은 남아 있지만 다시 얻을 수 있다.
+    # Windows 는 죽은 프로세스의 잠금을 곧바로가 아니라 잠시 뒤에 풀 때가 있어 2초까지 다시 시도한다.
     lock = InstanceLock(lock_path)
-    lock.acquire()                                 # 잠금 파일은 남아 있지만 다시 얻을 수 있다
+    for _ in range(20):
+        try:
+            lock.acquire()
+            break
+        except AlreadyRunning:
+            time.sleep(0.1)
+    else:
+        lock.acquire()                             # 2초가 지나도 안 풀리면 실패로 보여 준다
     lock.release()
 
 

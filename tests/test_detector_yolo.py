@@ -8,7 +8,7 @@ from PIL import Image
 from app.config import PROJECT_ROOT
 from app.detector.yolo import (
     INPUT_SIZE, Box, Section, SectionResult, YoloDetector, apply_nms, iou, parse_output, pick_best,
-    mip_level, preprocess, resize_like_canvas, sections_of,
+    mip_level, mip_of, preprocess, resize_like_canvas, sections_of,
 )
 
 FULL = Section("full", 0, 0, 1280, 640)   # 640 입력 기준 가로 2배, 세로 1배
@@ -117,6 +117,34 @@ def test_Canvas식_리사이즈는_밉맵_단계에서_픽셀_중심을_읽는�
     assert pixels.shape == (640, 640, 3) and pixels.dtype == np.uint8
     assert pixels[0, 0].tolist() == [255, 255, 255] and pixels[0, -1].tolist() == [0, 0, 0]
     assert pixels[0, 319].tolist() == [255] * 3 and pixels[0, 320].tolist() == [0] * 3   # 경계가 정확히 가운데
+
+
+def naive_bilinear(pixels, xs, ys):
+    """_bilinear 를 빠르게 고치기 전의 단순한 계산. 고친 코드가 이것과 한 비트도 다르지 않아야 한다."""
+    height, width = pixels.shape[:2]
+    u, v = np.clip(xs - 0.5, 0, width - 1), np.clip(ys - 0.5, 0, height - 1)
+    x0, y0 = np.floor(u).astype(np.intp), np.floor(v).astype(np.intp)
+    x1, y1 = np.minimum(x0 + 1, width - 1), np.minimum(y0 + 1, height - 1)
+    wx, wy = (u - x0)[np.newaxis, :, np.newaxis], (v - y0)[:, np.newaxis, np.newaxis]
+    source = pixels.astype(np.float32)
+    top = source[y0][:, x0] * (1 - wx) + source[y0][:, x1] * wx
+    bottom = source[y1][:, x0] * (1 - wx) + source[y1][:, x1] * wx
+    return np.clip(np.round(top * (1 - wy) + bottom * wy), 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("size", [(731, 1300), (2560, 1440), (300, 200), (641, 641)])
+def test_빠르게_고친_리사이즈는_예전_계산과_비트_단위로_같다(size):
+    rng = np.random.default_rng(sum(size))
+    image = Image.fromarray(rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8), "RGB")
+    detector = YoloDetector(FakeSession([]))
+    cache = {}
+    for section in sections_of(*image.size):
+        mip = np.asarray(mip_of(image, mip_level(section), cache))
+        fx, fy = image.width / mip.shape[1], image.height / mip.shape[0]
+        steps = (np.arange(INPUT_SIZE) + 0.5) / INPUT_SIZE
+        xs, ys = (section.x + steps * section.width) / fx, (section.y + steps * section.height) / fy
+        assert np.array_equal(resize_like_canvas(image, section, cache), naive_bilinear(mip, xs, ys))
+    detector._pool.shutdown()
 
 
 class FakeSession:

@@ -8,6 +8,7 @@ reference/src/App.tsx 의 preprocessSection, runDetection, calculateIoU, applyNm
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,23 +91,39 @@ def _bilinear(pixels: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     x0, y0 = np.floor(u).astype(np.intp), np.floor(v).astype(np.intp)
     x1, y1 = np.minimum(x0 + 1, width - 1), np.minimum(y0 + 1, height - 1)
     wx, wy = (u - x0)[np.newaxis, :, np.newaxis], (v - y0)[:, np.newaxis, np.newaxis]
-    source = pixels.astype(np.float32)
-    top = source[y0][:, x0] * (1 - wx) + source[y0][:, x1] * wx
-    bottom = source[y1][:, x0] * (1 - wx) + source[y1][:, x1] * wx
-    return np.clip(np.round(top * (1 - wy) + bottom * wy), 0, 255).astype(np.uint8)
+    # 원본 행 하나의 가로 보간 결과는 어느 출력 행에서 쓰든 같다. 쓰이는 원본 행만 한 번씩 계산해 재사용한다.
+    # 계산 순서(가로 → 세로, float64)는 그대로라 결과는 한 비트도 바뀌지 않는다.
+    rows = np.unique(np.concatenate([y0, y1]))
+    source = pixels[rows]
+    horizontal = np.multiply(source[:, x0], 1 - wx, dtype=np.float64)
+    horizontal += source[:, x1] * wx
+    result = horizontal[np.searchsorted(rows, y0)] * (1 - wy)
+    result += horizontal[np.searchsorted(rows, y1)] * wy
+    np.round(result, out=result)
+    return np.clip(result, 0, 255, out=result).astype(np.uint8)
 
 
-def resize_like_canvas(image: Image.Image, section: Section) -> np.ndarray:
+def mip_of(image: Image.Image, level: int, cache: dict | None = None) -> Image.Image:
+    """이미지를 level 번 절반으로 줄인 사본(2×2 평균). cache 를 주면 같은 이미지의 세 구역이 함께 쓴다."""
+    if cache is None:
+        cache = {}
+    cache.setdefault(0, image)
+    done = max(step for step in cache if step <= level)
+    mip = cache[done]
+    for step in range(done + 1, level + 1):
+        if mip.width < 2 or mip.height < 2:
+            break
+        mip = cache[step] = mip.reduce(2)
+    return mip
+
+
+def resize_like_canvas(image: Image.Image, section: Section, cache: dict | None = None) -> np.ndarray:
     """구역을 640×640 으로 늘린 RGB uint8 배열. 브라우저(Chrome) Canvas drawImage 와 가깝게 만든다.
 
     Chrome 은 크게 줄일 때 이미지 전체를 절반씩 줄인 사본(밉맵)을 만들고, 알맞은 단계에서 bilinear 로 읽는다.
     Pillow 의 BILINEAR(안티앨리어싱)로 줄이면 YOLO 점수가 평균 0.04 달라졌고, 이 방식은 0.007 이었다 (명세 9-2).
     """
-    mip = image
-    for _ in range(mip_level(section)):
-        if mip.width < 2 or mip.height < 2:
-            break
-        mip = mip.reduce(2)   # 2×2 평균
+    mip = mip_of(image, mip_level(section), cache)
     fx, fy = image.width / mip.width, image.height / mip.height
     steps = (np.arange(INPUT_SIZE) + 0.5) / INPUT_SIZE
     xs = (section.x + steps * section.width) / fx
@@ -114,9 +131,9 @@ def resize_like_canvas(image: Image.Image, section: Section) -> np.ndarray:
     return _bilinear(np.asarray(mip), xs, ys)
 
 
-def preprocess(image: Image.Image, section: Section) -> np.ndarray:
+def preprocess(image: Image.Image, section: Section, cache: dict | None = None) -> np.ndarray:
     """R3. 구역을 비율을 무시하고 640×640 으로 늘린 뒤 /255 → [1, 3, 640, 640] float32 (RGB)."""
-    pixels = resize_like_canvas(image, section).astype(np.float32) / 255
+    pixels = resize_like_canvas(image, section, cache).astype(np.float32) / 255
     return pixels.transpose(2, 0, 1)[np.newaxis]   # HWC → NCHW
 
 
@@ -197,6 +214,8 @@ class YoloDetector:
         """session: onnxruntime.InferenceSession (테스트에서는 run() 만 있는 가짜)."""
         self.session = session
         self.input_name = session.get_inputs()[0].name
+        # 세 구역의 리사이즈를 동시에 한다. NumPy 계산은 GIL 을 풀어 주므로 스레드로도 여러 코어를 쓴다.
+        self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yolo-resize")
 
     @classmethod
     def load(cls, model_path: Path) -> "YoloDetector":
@@ -209,10 +228,23 @@ class YoloDetector:
         session = ort.InferenceSession(str(model_path), options, providers=["CPUExecutionProvider"])
         return cls(session)
 
-    def detect_section(self, image: Image.Image, section: Section) -> SectionResult:
-        output = self.session.run(None, {self.input_name: preprocess(image, section)})[0]
+    def detect_section(self, image: Image.Image, section: Section, cache: dict | None = None) -> SectionResult:
+        output = self.session.run(None, {self.input_name: preprocess(image, section, cache)})[0]
         return SectionResult(section, apply_nms(parse_output(output, section)))
 
     def find_best(self, image: Image.Image) -> SectionResult:
-        """세 구역을 모두 추론하고 한 구역만 고른다. image 는 RGB."""
-        return pick_best([self.detect_section(image, s) for s in sections_of(image.width, image.height)])
+        """세 구역을 모두 추론하고 한 구역만 고른다. image 는 RGB.
+
+        밉맵은 세 구역이 함께 쓰도록 먼저 만들고, 리사이즈는 세 구역을 동시에 한다.
+        YOLO 는 구역 순서대로 하나씩 돌린다 (첫 구역 추론 중에 나머지 구역 리사이즈가 이어진다).
+        """
+        sections = sections_of(image.width, image.height)
+        cache: dict = {}
+        for section in sections:
+            mip_of(image, mip_level(section), cache)   # 스레드들이 같은 사본을 읽기만 하도록 미리 만든다
+        tensors = [self._pool.submit(preprocess, image, section, cache) for section in sections]
+        results = []
+        for section, tensor in zip(sections, tensors):
+            output = self.session.run(None, {self.input_name: tensor.result()})[0]
+            results.append(SectionResult(section, apply_nms(parse_output(output, section))))
+        return pick_best(results)
