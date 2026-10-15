@@ -6,6 +6,7 @@
     python -m app resume                              남은 작업을 이어서 수집
     python -m app status                              진행 상황 출력
     python -m app serve                               웹 서버 실행 (http://127.0.0.1:8000)
+    python -m app detect [--now]                      검출 워커 실행 (보통은 serve 가 동작 시간에 띄운다)
     python -m app detect-one <파일 또는 폴더> [--json] 이미지를 검출해 결과만 출력 (검출 의존성 필요)
 """
 
@@ -38,6 +39,9 @@ def main() -> None:
     serve = commands.add_parser("serve", help="웹 서버를 실행한다")
     serve.add_argument("--port", type=int, default=8000)
 
+    detect = commands.add_parser("detect", help="검출 워커를 실행한다 (보통은 serve 가 알아서 띄운다)")
+    detect.add_argument("--now", action="store_true", help="스위치와 동작 시간을 무시하고 지금 바로 검출한다")
+
     detect_one = commands.add_parser("detect-one", help="이미지 파일(또는 폴더)을 검출해 결과만 출력한다 (DB·파일 저장 없음)")
     detect_one.add_argument("paths", nargs="+", help="이미지 파일 또는 폴더")
     detect_one.add_argument("--json", action="store_true", help="이미지 1장 = JSON 한 줄로 출력 (reference 와 비교용)")
@@ -59,6 +63,8 @@ def main() -> None:
 
     if args.command == "detect-one":
         sys.exit(_detect_one(args.paths, as_json=args.json))
+    if args.command == "detect":
+        sys.exit(_detect(ignore_schedule=args.now))
 
     setup_logging()
     try:
@@ -110,6 +116,54 @@ async def _run(args: argparse.Namespace) -> int:
         await runtime.scheduler.run_until_idle()
         _print_progress(runtime.conn)
         return 0
+
+
+def _detect(ignore_schedule: bool) -> int:
+    """검출 워커 1회 실행. 종료 코드: 0 정상(할 일 없음·조건 끝), 1 오류, 3 다른 워커가 실행 중."""
+    import logging
+
+    from .db import connect, init_db
+    from .detector.supervisor import EXIT_LOCKED
+    from .instance_lock import InstanceLock
+    from .keep_awake import KeepAwake
+
+    setup_logging(filename="detector.log")
+    log = logging.getLogger("app.detector")
+    settings = Settings.from_env()
+    lock = InstanceLock(settings.db_path.with_name(settings.db_path.name + ".detect.lock"),
+                        "검출 워커가 이미 실행 중입니다.")
+    try:
+        lock.acquire()
+    except AlreadyRunning as err:
+        log.info("%s", err)
+        return EXIT_LOCKED
+
+    keep_awake = KeepAwake()
+    keep_awake.update(True)   # 퇴근 뒤 검출하는 동안 PC 가 절전에 들어가지 않게 한다
+    try:
+        # torch 등 무거운 패키지는 여기서 처음 불러온다
+        from .detector.dataset import DatasetWriter
+        from .detector.pipeline import Pipeline
+        from .detector.worker import TooManyErrors, Worker
+
+        conn = connect(settings.db_path)
+        init_db(conn)
+        writer = DatasetWriter(settings.detect_save_path) if settings.detect_save_crops else None
+        worker = Worker(conn, lambda: Pipeline.load(settings), writer, settings.base_save_path,
+                        ignore_schedule=ignore_schedule)
+        try:
+            processed = worker.run()
+        except TooManyErrors as err:
+            log.error("검출을 멈춥니다: %s", err)
+            return 1
+        except Exception:
+            log.exception("검출 워커가 멈췄습니다 (모델 파일, 백본 다운로드 등을 확인하세요)")
+            return 1
+        log.info("검출 워커 종료: 이번에 %d장 처리", processed)
+        return 0
+    finally:
+        keep_awake.update(False)
+        lock.release()
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}

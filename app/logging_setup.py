@@ -10,12 +10,13 @@ from .config import PROJECT_ROOT
 _FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 
 
-def setup_logging(log_dir: Path = PROJECT_ROOT / "logs") -> None:
+def setup_logging(log_dir: Path = PROJECT_ROOT / "logs", filename: str = "collector.log") -> None:
+    """filename: 수집기는 collector.log, 검출 워커는 detector.log (두 프로세스가 한 파일을 함께 쓰지 않게)."""
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # 5MB 가 차면 collector.log.1, .2 … 로 넘기고 5개까지만 보관한다 (밤새 돌려도 디스크를 채우지 않게)
     file_handler = RotatingFileHandler(
-        log_dir / "collector.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8"
+        log_dir / filename, maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
 
     # Windows 콘솔(cp949)이 표현하지 못하는 문자가 섞여도 로그 때문에 죽지 않게 한다
@@ -30,3 +31,4 @@ def setup_logging(log_dir: Path = PROJECT_ROOT / "logs") -> None:
     # httpx 는 요청마다 전체 URL 을 INFO 로 찍는다. Pixabay 는 URL 에 API 키가 들어 있으므로 꺼 둔다.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)   # 검출 워커가 백본을 받을 때의 요청 로그

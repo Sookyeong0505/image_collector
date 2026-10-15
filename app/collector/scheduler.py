@@ -5,7 +5,7 @@
 
     unsplash 태스크:  beach ──(한도 대기)── beach ── sunset ── …
     pexels   태스크:  beach ── sunset ── forest ── …
-                              └ beach 를 모든 사이트가 끝내는 순간 → 검출 작업 등록
+                              └ beach 를 모든 사이트가 끝내는 순간 → 수집 완료 처리
 
 엔진이 올린 결과에 따라 작업 상태를 바꾼다.
 
@@ -171,9 +171,9 @@ class Scheduler:
 
         self._current.pop(source.name, None)
 
-        # 이 키워드를 모든 사이트가 끝냈으면 검출 작업을 등록한다
+        # 이 키워드를 모든 사이트가 끝냈으면 수집 완료로 옮긴다 (검출 대상으로 고른 키워드면 검출도 이어진다)
         if repo.complete_keyword_if_finished(conn, job["keyword_id"]):
-            log.info("'%s' 수집 완료 — 검출 작업 등록", job["keyword"])
+            log.info("'%s' 수집 완료", job["keyword"])
 
     def _pause(self, job_id: int, err: Exception, seconds: int) -> None:
         resume_at = self.clock() + timedelta(seconds=seconds)

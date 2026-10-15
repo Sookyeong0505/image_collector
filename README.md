@@ -3,7 +3,8 @@
 키워드를 등록해 두면 여러 이미지 사이트에서 사진을 자동으로 모으는 프로그램입니다.
 켜 두면 API 한도나 오류를 스스로 기다렸다가 이어서 수집하고, 껐다 켜도 멈춘 자리부터 다시 시작합니다.
 
-수집한 이미지는 이후 오탐 후보 검출 단계의 입력으로 쓸 예정이며, 현재는 **수집 기능**까지 구현되어 있습니다.
+수집한 이미지에서 검출 대상을 자동으로 찾는 **자동 검출**도 함께 들어 있습니다. 퇴근한 뒤 정해 둔 시간에만 돌고,
+양성 이미지는 날짜별 폴더(`20261015_dataset`)에 모아 팀원에게 보낼 수 있게 저장합니다. 검출 설계는 [docs/DETECTION_SPEC.md](docs/DETECTION_SPEC.md)에 있습니다.
 
 ## 기능
 
@@ -20,7 +21,7 @@
   - 시간당 API 한도 도달: 남은 시간만큼 대기 후 재개
   - 심각한 오류: 해당 작업만 10분 쉬었다가 재개
   - API 키 오류: 1시간 간격으로 재시도, 3번째에 실패 처리
-- **검출 연계**: 키워드 하나를 모든 사이트가 끝내면 검출 작업을 DB에 등록
+- **자동 검출**: 화면에서 고른 키워드만, 켜 둔 동안 정해 둔 시간(기본 19:00~08:00)에 검출. 수집 중인 키워드도 새 이미지를 이어서 검출
 - **API 연결 확인**: 사이트별로 키가 유효한지 검사
 - **진행 화면과 로그**: 웹 화면에서 사이트별 진행률 확인, 파일 로그 기록 (API 키는 가려서 기록)
 
@@ -77,11 +78,44 @@ copy .env.sample .env
 |---|---|
 | `↑` `↓` | 수집 순서 바꾸기. 지금 수집 중인 작업은 끝까지 하고, 다음 작업부터 새 순서를 따릅니다 |
 | `보류` / `보류 해제` | 수집을 잠시 빼 두기. 수집 중이었으면 바로 멈추고, 보류를 풀면 멈춘 페이지부터 이어서 합니다 |
-| `완료` | 수집을 여기서 마치고 수집 완료로 옮깁니다. 남은 사이트 수집은 멈추고, 받은 이미지는 남으며 검출 작업이 등록됩니다 |
+| `완료` | 수집을 여기서 마치고 수집 완료로 옮깁니다. 남은 사이트 수집은 멈추고, 받은 이미지는 남습니다 |
 | `삭제` | 키워드와 수집 기록을 지웁니다. 이미 받은 이미지 파일은 남습니다 |
 
 수집을 마친 키워드는 순서를 바꾸거나 보류·삭제할 수 없습니다.
 `수집 중`·`수집 완료` 탭은 한 페이지에 10개씩 나눠 보여 줍니다. `수집 완료` 탭은 키워드마다 수집한 사이트를 태그로 보여 줍니다(실패한 사이트는 빨간색).
+
+### 자동 검출
+
+검출에는 별도 패키지가 필요합니다 (처음 한 번, GPU 용 torch 를 먼저 설치).
+
+```
+.venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\python -m pip install -e .[dev,detect]
+```
+
+모델 파일은 `models\` 아래에 둡니다 (`yolo\best_640n_0522.onnx`, `swinv2\run_…\`, `dinov2\run_…\`). git 에는 올리지 않습니다.
+백본(SwinV2·DINOv2, 약 2GB)은 처음 검출할 때 Hugging Face 에서 받습니다.
+
+웹 화면의 `자동 검출` 칸에서 설정합니다.
+
+1. `키워드 추가` 탭에서 검출할 키워드의 `검출하기`를 누릅니다. 수집 중인 키워드도 고를 수 있습니다.
+2. 동작 시간을 정하고 `시간 저장`을 누릅니다. 기본은 19:00~08:00 입니다. 시작과 끝을 같게 하면 하루 종일입니다.
+3. `켜기`를 체크합니다.
+
+켜져 있고 동작 시간 안이고 검출할 이미지가 있으면, 서버가 검출 워커를 띄워 고른 순서대로 검출합니다.
+동작 시간이 끝나거나 스위치를 끄면 지금 이미지만 마치고 멈추며, 다음 동작 시간에 이어서 합니다.
+근무 시간에는 워커가 떠 있지 않아 GPU·메모리를 쓰지 않습니다. 검출하는 동안에는 PC 가 절전에 들어가지 않습니다.
+
+| 표시 | 뜻 |
+|---|---|
+| 검출 중 | 워커가 일하는 중 |
+| 동작 시간 밖 | 켜져 있지만 지금은 쉬는 시간. 시작 시각에 자동으로 시작 |
+| 꺼짐 | 스위치가 꺼져 있음 |
+| 검출할 이미지 없음 | 고른 키워드의 이미지를 모두 검출함 |
+| 오류로 멈춤 | 워커가 비정상 종료함. 10분 뒤 다시 시도 (`logs\detector.log` 확인) |
+
+`검출 대상` 탭의 진행바는 `검출한 장수 / 받은 장수`이고, `양성`은 양성으로 판정한 이미지 수입니다.
+`빼기`로 검출 대상에서 빼도 이미 검출한 결과와 저장한 파일은 남습니다.
 
 ### 명령줄로
 
@@ -91,7 +125,10 @@ copy .env.sample .env
 | `python -m app collect "beach, sunset" --sites pexels,naver` | 키워드를 등록하고 끝날 때까지 수집 |
 | `python -m app resume` | 남은 작업을 이어서 수집 |
 | `python -m app status` | 진행 상황 출력 |
-| `python -m app serve --port 8000` | 웹 서버 실행 |
+| `python -m app serve --port 8000` | 웹 서버 실행 (자동 검출 관리 포함) |
+| `python -m app detect` | 검출 워커를 직접 실행. 스위치·동작 시간을 따름 |
+| `python -m app detect --now` | 스위치·동작 시간을 무시하고 지금 바로 검출 |
+| `python -m app detect-one <파일 또는 폴더>` | 이미지를 검출해 결과만 출력 (DB·파일 저장 없음) |
 
 명령 앞에 `.venv\Scripts\`를 붙여 실행합니다. `collect`에서 `--sites`를 빼면 키가 설정된 모든 사이트에서,
 작업마다 `.env`의 `MAX_DOWNLOADS`만큼 받습니다. `Ctrl+C`로 멈춘 뒤 `resume`으로 이어서 할 수 있습니다.
@@ -177,8 +214,10 @@ Start-ScheduledTask -TaskName ImageCollector
 | 위치 | 내용 |
 |---|---|
 | `{BASE_SAVE_PATH}\{키워드}\{사이트}\{키워드}_{사진ID}.jpg` | 수집한 이미지 |
-| `data\pipeline.db` | 키워드, 작업 진행 상태, 이미지 목록과 출처, 검출 대기 작업 (SQLite) |
-| `logs\collector.log` | 실행 로그. 5MB마다 새 파일로 넘기고 5개까지 보관 |
+| `data\pipeline.db` | 키워드, 작업 진행 상태, 이미지 목록과 출처, 검출 설정·작업·결과 (SQLite) |
+| `{DETECT_SAVE_PATH}\YYYYMMDD_dataset\` | 검출한 날짜별 양성 결과: `detect_img\`(원본 사본), `class1·3·4·5\`(Crop 3배율), `metadata.jsonl` |
+| `logs\collector.log` | 수집기 로그. 5MB마다 새 파일로 넘기고 5개까지 보관 |
+| `logs\detector.log` | 검출 워커 로그 |
 
 DB 내용은 [DB Browser for SQLite](https://sqlitebrowser.org/) 같은 도구로 열어 볼 수 있습니다.
 
@@ -196,10 +235,14 @@ DB 내용은 [DB Browser for SQLite](https://sqlitebrowser.org/) 같은 도구�
 | POST | `/api/keywords/{id}/hold` | 예약 키워드 보류 |
 | POST | `/api/keywords/{id}/resume` | 보류 풀기 |
 | DELETE | `/api/keywords/{id}` | 예약 키워드 삭제 (받은 이미지 파일은 남음) |
-| POST | `/api/keywords/{id}/complete` | 수집을 여기서 마치고 수집 완료로 옮기기 (검출 작업 등록) |
+| POST | `/api/keywords/{id}/complete` | 수집을 여기서 마치고 수집 완료로 옮기기 |
 | POST | `/api/collector/stop` | 수집 일시 중단 |
 | POST | `/api/collector/start` | 수집 재개 |
 | GET | `/api/health` | 서버 상태 (스케줄러 동작 여부, 남은 작업 수, 절전 방지 여부, 마지막 저장 시각) |
+| GET | `/api/detection` | 자동 검출 설정·상태, 키워드별 검출 진행률 |
+| PUT | `/api/detection/settings` | 켜기·끄기, 동작 시간. 본문 예: `{"enabled": true, "window_start": "19:00", "window_end": "08:00"}` |
+| POST | `/api/detection/keywords/{id}` | 검출할 키워드로 지정 |
+| DELETE | `/api/detection/keywords/{id}` | 검출 대상에서 빼기 (결과는 남음) |
 
 ## 프로젝트 구조
 
@@ -225,9 +268,15 @@ app/
     ├── images.py            이미지 검사, 해시 계산, 파일 저장
     ├── dedup.py             지각 해시 색인
     └── sources/             사이트 명세 (base.py + unsplash, pexels, pixabay, naver)
+app/detector/               자동 검출 (reference 검출 프로그램을 옮긴 것)
+├── supervisor.py            서버 안에서 켜기·동작 시간을 보고 워커를 띄움
+├── worker.py                워커 1회 실행 (python -m app detect)
+├── pipeline.py              이미지 1장 → 판정 (yolo · skin · crops · verifiers)
+└── dataset.py               날짜 폴더에 원본·Crop·metadata 저장
 scripts/                     자동 시작 등록·제거 스크립트 (PowerShell)
 tests/                       가짜 웹·가짜 시계 기반 테스트
-docs/COLLECTION_SPEC.md      설계 문서 (기능, 데이터 흐름, 스키마, 결정 사항)
+docs/COLLECTION_SPEC.md      수집 설계 문서 (기능, 데이터 흐름, 스키마, 결정 사항)
+docs/DETECTION_SPEC.md       검출 설계 문서 (reference 이식, 자동 검출, 결과 파일, 동등성 비교)
 ```
 
 ### 동작 흐름
@@ -240,7 +289,10 @@ flowchart TB
     ENG -->|"검색, 다운로드"| SRC["사이트 명세<br/>unsplash · pexels · pixabay · naver"]
     ENG -->|"중복 검사 후 저장"| FS[("이미지 폴더")]
     ENG -->|"커서, 진행 카운터"| DB
-    SCH -->|"키워드 완료 시<br/>검출 작업 등록"| DB
+    UI -->|"검출할 키워드 · 켜기 · 동작 시간"| DB
+    SUP["워커 관리"] -->|"동작 시간에 실행"| WK["검출 워커"]
+    WK -->|"결과"| DB
+    WK --> OUT[("YYYYMMDD_dataset")]
 ```
 
 - **스케줄러**는 사이트마다 태스크를 하나씩 띄웁니다. 각 태스크는 자기 사이트의 작업을 키워드 순서대로 처리합니다.
@@ -257,7 +309,10 @@ flowchart TB
 | `collect_jobs` | 키워드 × 사이트 수집 작업 1개 (상태, 커서, 진행 카운터) |
 | `images` | 고유한 이미지 1장. 지각 해시 중복은 파일 없이 원본을 가리키는 기록으로 남음 |
 | `image_sources` | 이미지를 어느 사이트의 어떤 키워드 검색에서 발견했는지 |
-| `detection_jobs` | 수집이 끝난 키워드의 검출 대기 작업 |
+| `detection_jobs` | 검출하라고 고른 키워드 1개 (대기 · 검출 중 · 새 이미지 기다림 · 완료) |
+| `detector_settings` | 자동 검출 켜기 여부와 동작 시간 (1행) |
+| `image_checks` | 이미지 1장의 검출 결과 (양성·음성·오류, 저장한 날짜 폴더) |
+| `detections` | 피부색 필터를 통과한 검출 1건 (좌표, YOLO·SwinV2·DINOv2 점수, 판정 사유) |
 
 ## 테스트
 
@@ -282,5 +337,5 @@ flowchart TB
 
 ## 앞으로 할 일
 
-- 오탐 후보 검출: YOLO 검출 → crop 저장 → 분류기 참고 판정 (별도 워커 프로세스)
-- 검수 화면
+- 검수 화면 (검출 결과를 사람이 확인)
+- 검출 개선 브랜치 (letterbox, 구역 결과 합치기, 판정 기준 조정 — 검출 명세 11장)

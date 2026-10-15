@@ -17,8 +17,10 @@ class AlreadyRunning(Exception):
 
 
 class InstanceLock:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path,
+                 busy_message: str = "수집기가 이미 실행 중입니다 (자동 시작 작업 또는 다른 serve / collect / resume)."):
         self.path = path
+        self.busy_message = busy_message   # 검출 워커는 자기 잠금 파일과 안내 문구를 쓴다
         self._file = None
 
     def acquire(self) -> None:
@@ -35,9 +37,7 @@ class InstanceLock:
                 fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as err:
             file.close()
-            raise AlreadyRunning(
-                "수집기가 이미 실행 중입니다 (자동 시작 작업 또는 다른 serve / collect / resume)."
-            ) from err
+            raise AlreadyRunning(self.busy_message) from err
         self._file = file
 
     def release(self) -> None:

@@ -160,7 +160,7 @@ def test_수집을_마친_키워드는_보류하거나_지울_수_없다(setting
         assert client.delete(f"/api/keywords/{keyword['id']}").status_code == 409
 
 
-def test_완료하면_남은_작업을_끝내고_수집_완료로_옮겨_검출을_등록한다(conn):
+def test_완료하면_남은_작업을_끝내고_수집_완료로_옮긴다(conn):
     repo.add_keywords(conn, ["beach"], ["pexels", "pixabay", "naver"], None)
     keyword_id = ids_of(conn)["beach"]
     conn.execute("UPDATE collect_jobs SET status = 'done', finished_at = '2026-01-01 00:00:00' WHERE site = 'pexels'")
@@ -176,7 +176,7 @@ def test_완료하면_남은_작업을_끝내고_수집_완료로_옮겨_검출�
     assert rows["pexels"]["finished_at"] == "2026-01-01 00:00:00"      # 이미 끝난 작업은 건드리지 않는다
     keyword = repo.get_keyword(conn, keyword_id)
     assert (keyword["status"], keyword["held"]) == ("collected", 0)
-    assert conn.execute("SELECT COUNT(*) FROM detection_jobs").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM detection_jobs").fetchone()[0] == 0   # 검출할 키워드는 사용자가 고른다
 
 
 def test_수집_중인_키워드를_API로_완료한다(settings, web):

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS keywords (
     status      TEXT    NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending', 'collecting', 'collected')),
     held        INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1)),  -- 1 = 보류. 스케줄러가 이 키워드의 작업을 건너뛴다
+    detect_hidden INTEGER NOT NULL DEFAULT 0 CHECK (detect_hidden IN (0, 1)),  -- 1 = 검출 '키워드 추가' 목록에서 숨김
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -82,15 +83,60 @@ CREATE TABLE IF NOT EXISTS image_sources (
 CREATE INDEX IF NOT EXISTS idx_image_sources_image   ON image_sources (image_id);
 CREATE INDEX IF NOT EXISTS idx_image_sources_keyword ON image_sources (keyword_id);
 
--- 키워드 1개의 검출 작업. 수집기가 등록하고 검출 워커가 가져간다 (두 프로세스의 유일한 접점).
+-- 사용자가 검출하라고 고른 키워드 1개 = 1행 (설계: docs/DETECTION_SPEC.md 5-1)
+-- 수집기와 검출 워커의 접점. 화면이 등록하고 워커가 가져간다.
+--   pending  검출할 이미지가 있다 (또는 아직 확인 전)
+--   running  워커가 처리 중
+--   waiting  남은 이미지가 없지만 키워드가 아직 수집 중이다. 새 이미지가 들어오면 다시 처리한다
+--   done     키워드 수집도 끝났고 모든 이미지를 검출했다
 CREATE TABLE IF NOT EXISTS detection_jobs (
     id           INTEGER PRIMARY KEY,
     keyword_id   INTEGER NOT NULL UNIQUE REFERENCES keywords(id) ON DELETE CASCADE,
     status       TEXT    NOT NULL DEFAULT 'pending'
-                 CHECK (status IN ('pending', 'running', 'done', 'failed')),
-    processed    INTEGER NOT NULL DEFAULT 0,
-    total        INTEGER,
+                 CHECK (status IN ('pending', 'running', 'waiting', 'done')),
     created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
     started_at   TEXT,
     finished_at  TEXT
+);
+
+-- 자동 검출 설정. 항상 1행만 있다. 시각은 PC 현지 시각 'HH:MM'.
+-- 시작이 끝보다 늦으면 자정을 넘는 구간이고(19:00~08:00), 같으면 하루 종일이다.
+CREATE TABLE IF NOT EXISTS detector_settings (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled       INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    window_start  TEXT    NOT NULL DEFAULT '19:00',
+    window_end    TEXT    NOT NULL DEFAULT '08:00'
+);
+INSERT OR IGNORE INTO detector_settings (id) VALUES (1);
+
+-- 이미지 1장의 검출 요약. 다시 검출하면 덮어쓴다.
+CREATE TABLE IF NOT EXISTS image_checks (
+    image_id      INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+    pipeline      TEXT    NOT NULL,              -- 'original'. 개선 브랜치 결과와 구분하는 이름
+    verdict       TEXT    NOT NULL CHECK (verdict IN ('positive', 'negative', 'error')),
+    section       TEXT    CHECK (section IN ('full', 'left', 'right')),  -- 채택한 구역. YOLO 박스가 없으면 NULL
+    yolo_boxes    INTEGER NOT NULL DEFAULT 0,    -- 채택 구역의 박스 수 (NMS 후)
+    skin_passed   INTEGER NOT NULL DEFAULT 0,    -- 피부색 필터 통과 수 = detections 행 수
+    dataset_dir   TEXT,                          -- 결과 파일을 저장한 날짜 폴더 (예: 20261015_dataset). 저장 안 했으면 NULL
+    original_copy TEXT,                          -- 원본 사본 경로 (날짜 폴더 기준)
+    error         TEXT,
+    elapsed_ms    INTEGER,
+    checked_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 피부색 필터를 통과한 검출 1건 = 1행
+CREATE TABLE IF NOT EXISTS detections (
+    id               INTEGER PRIMARY KEY,
+    image_id         INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    det_index        INTEGER NOT NULL,           -- 이미지 안에서의 순번 (0부터)
+    class_id         INTEGER NOT NULL CHECK (class_id IN (1, 3, 4, 5)),
+    yolo_conf        REAL    NOT NULL,
+    x1 INTEGER NOT NULL, y1 INTEGER NOT NULL, x2 INTEGER NOT NULL, y2 INTEGER NOT NULL,  -- 원본 좌표
+    swinv2_score     REAL    NOT NULL,           -- x1 Crop
+    dinov2_x15_score REAL    NOT NULL,           -- x1.5 Crop
+    dinov2_x2_score  REAL    NOT NULL,           -- x2 Crop
+    reasons          TEXT    NOT NULL,           -- 참인 조건 이름의 JSON 배열. 비어 있으면 음성
+    positive         INTEGER NOT NULL CHECK (positive IN (0, 1)),
+    crop_group       TEXT,                       -- 저장한 Crop 3장의 그룹 ID. 저장 안 했으면 NULL
+    UNIQUE (image_id, det_index)
 );

@@ -43,6 +43,9 @@ def add_keywords(conn: sqlite3.Connection, keywords: list[str], sites: list[str]
                 (keyword_id, site, target_count),
             )
         conn.execute("UPDATE keywords SET status = 'pending' WHERE id = ? AND status = 'collected'", (keyword_id,))
+        # 검출을 마친 키워드를 다시 수집하면, 새로 받는 이미지를 이어서 검출하도록 기다리는 상태로 돌린다
+        conn.execute("UPDATE detection_jobs SET status = 'waiting', finished_at = NULL "
+                     "WHERE keyword_id = ? AND status = 'done'", (keyword_id,))
 
     conn.commit()
     return keyword_ids
@@ -77,8 +80,7 @@ def set_held(conn: sqlite3.Connection, keyword_id: int, held: bool) -> None:
 def finish_keyword(conn: sqlite3.Connection, keyword_id: int, now: str) -> bool:
     """남은 사이트 작업을 모두 끝난 것(done)으로 바꾸고 키워드를 수집 완료로 옮긴다.
 
-    사용자가 '이 정도면 됐다'고 판단해 수집을 마칠 때 쓴다. 이미 받은 이미지는 그대로 두고,
-    수집 완료가 되면 다른 키워드처럼 검출 작업이 등록된다.
+    사용자가 '이 정도면 됐다'고 판단해 수집을 마칠 때 쓴다. 이미 받은 이미지는 그대로 둔다.
     """
     conn.execute(
         """
@@ -196,9 +198,11 @@ def add_auth_failure(conn: sqlite3.Connection, job_id: int) -> int:
 
 
 def complete_keyword_if_finished(conn: sqlite3.Connection, keyword_id: int) -> bool:
-    """키워드의 모든 사이트 작업이 끝났으면(done/failed) 검출 작업을 등록한다.
+    """키워드의 모든 사이트 작업이 끝났으면(done/failed) 키워드를 수집 완료로 옮긴다.
 
-    수집기와 검출 워커를 잇는 유일한 지점이다. 실패한 사이트가 있어도 끝난 것으로 본다.
+    실패한 사이트가 있어도 끝난 것으로 본다. 검출할 키워드는 사용자가 고르므로 여기서 등록하지 않는다.
+    이미 검출 대상으로 고른 키워드라면 검출 작업을 pending 으로 돌린다. 워커가 남은 이미지를
+    검출하고 작업을 done 으로 마무리한다.
     """
     remaining = conn.execute(
         "SELECT COUNT(*) FROM collect_jobs WHERE keyword_id = ? AND status NOT IN ('done', 'failed')",
@@ -207,23 +211,11 @@ def complete_keyword_if_finished(conn: sqlite3.Connection, keyword_id: int) -> b
     if remaining:
         return False
 
-    # 이 키워드로 모은 이미지 중 아직 검출하지 않은 장수
-    total = conn.execute(
-        """
-        SELECT COUNT(DISTINCT i.id) FROM image_sources s JOIN images i ON i.id = s.image_id
-        WHERE s.keyword_id = ? AND i.path IS NOT NULL AND i.detected_at IS NULL
-        """,
-        (keyword_id,),
-    ).fetchone()[0]
-
     conn.execute("UPDATE keywords SET status = 'collected' WHERE id = ?", (keyword_id,))
     conn.execute(
-        """
-        INSERT INTO detection_jobs (keyword_id, total) VALUES (?, ?)
-        ON CONFLICT (keyword_id) DO UPDATE SET     -- 키워드를 다시 수집한 경우: 검출도 다시 대기열에
-            status = 'pending', total = excluded.total, processed = 0, started_at = NULL, finished_at = NULL
-        """,
-        (keyword_id, total),
+        "UPDATE detection_jobs SET status = 'pending', finished_at = NULL "
+        "WHERE keyword_id = ? AND status IN ('waiting', 'done')",
+        (keyword_id,),
     )
     conn.commit()
     return True
@@ -359,3 +351,204 @@ def progress(conn: sqlite3.Connection) -> list[dict]:
             ],
         })
     return result
+
+
+# ── 검출 (설계: docs/DETECTION_SPEC.md 5장) ─────────────────────────
+#
+# 검출 작업 1개 = 사용자가 고른 키워드 1개. 진행률은 저장하지 않고 images · image_checks 에서 센다.
+
+# 이 키워드로 받은 이미지 중 아직 검출하지 않은 것 (파일이 있는 원본만)
+_UNDETECTED = """
+    SELECT i.id, i.path FROM image_sources s JOIN images i ON i.id = s.image_id
+    WHERE s.keyword_id = {keyword} AND i.path IS NOT NULL AND i.detected_at IS NULL
+"""
+
+# 워커가 할 일이 있는 작업: 처음 등록됐거나 다시 열린 작업(pending), 기다리던 중 새 이미지가 들어온 작업(waiting)
+_WORKABLE_JOBS = f"""
+    SELECT d.*, k.text AS keyword
+    FROM detection_jobs d JOIN keywords k ON k.id = d.keyword_id
+    WHERE d.status = 'pending'
+       OR (d.status = 'waiting' AND EXISTS ({_UNDETECTED.format(keyword="d.keyword_id")}))
+    ORDER BY d.id
+"""
+
+
+def get_detector_settings(conn: sqlite3.Connection) -> dict:
+    row = conn.execute("SELECT * FROM detector_settings WHERE id = 1").fetchone()
+    return {"enabled": bool(row["enabled"]), "window_start": row["window_start"], "window_end": row["window_end"]}
+
+
+def update_detector_settings(conn: sqlite3.Connection, *, enabled: bool | None = None,
+                             window_start: str | None = None, window_end: str | None = None) -> dict:
+    """None 인 항목은 그대로 둔다. 시각 형식('HH:MM')은 부르는 쪽에서 검사한다."""
+    if enabled is not None:
+        conn.execute("UPDATE detector_settings SET enabled = ? WHERE id = 1", (int(enabled),))
+    if window_start is not None:
+        conn.execute("UPDATE detector_settings SET window_start = ? WHERE id = 1", (window_start,))
+    if window_end is not None:
+        conn.execute("UPDATE detector_settings SET window_end = ? WHERE id = 1", (window_end,))
+    conn.commit()
+    return get_detector_settings(conn)
+
+
+def select_for_detection(conn: sqlite3.Connection, keyword_id: int) -> None:
+    """키워드를 검출 대상에 넣는다. 이미 들어 있으면 그대로 둔다."""
+    conn.execute("INSERT INTO detection_jobs (keyword_id) VALUES (?) ON CONFLICT (keyword_id) DO NOTHING",
+                 (keyword_id,))
+    conn.commit()
+
+
+def unselect_for_detection(conn: sqlite3.Connection, keyword_id: int) -> bool:
+    """검출 대상에서 뺀다. 이미 검출한 결과는 남는다. 빠진 게 있으면 True."""
+    removed = conn.execute("DELETE FROM detection_jobs WHERE keyword_id = ?", (keyword_id,)).rowcount
+    conn.commit()
+    return bool(removed)
+
+
+def set_detect_hidden(conn: sqlite3.Connection, keyword_id: int, hidden: bool) -> None:
+    """검출 화면의 '키워드 추가' 목록에서 숨기거나 다시 보이게 한다. 수집과 검출에는 영향이 없다."""
+    conn.execute("UPDATE keywords SET detect_hidden = ? WHERE id = ?", (int(hidden), keyword_id))
+    conn.commit()
+
+
+def recover_detection(conn: sqlite3.Connection) -> int:
+    """워커가 죽기 전에 처리하던 작업을 pending 으로 돌린다. 워커가 시작할 때 부른다."""
+    count = conn.execute("UPDATE detection_jobs SET status = 'pending' WHERE status = 'running'").rowcount
+    conn.commit()
+    return count
+
+
+def has_detection_work(conn: sqlite3.Connection) -> bool:
+    return conn.execute(f"SELECT EXISTS ({_WORKABLE_JOBS})").fetchone()[0] == 1
+
+
+def next_detection_job(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(_WORKABLE_JOBS + " LIMIT 1").fetchone()
+
+
+def detection_job_exists(conn: sqlite3.Connection, job_id: int) -> bool:
+    """사용자가 처리 도중에 키워드를 빼면 행이 사라진다."""
+    return conn.execute("SELECT 1 FROM detection_jobs WHERE id = ?", (job_id,)).fetchone() is not None
+
+
+def mark_detection_running(conn: sqlite3.Connection, job_id: int, now: str) -> None:
+    conn.execute("UPDATE detection_jobs SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ?",
+                 (now, job_id))
+    conn.commit()
+
+
+def release_detection_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """워커가 작업을 마치지 못하고 멈출 때 (꺼짐 · 동작 시간 끝). 다음 실행 때 이어서 한다."""
+    conn.execute("UPDATE detection_jobs SET status = 'pending' WHERE id = ? AND status = 'running'", (job_id,))
+    conn.commit()
+
+
+def next_undetected_image(conn: sqlite3.Connection, keyword_id: int) -> sqlite3.Row | None:
+    return conn.execute(_UNDETECTED.format(keyword="?") + " ORDER BY i.id LIMIT 1", (keyword_id,)).fetchone()
+
+
+def settle_detection_job(conn: sqlite3.Connection, job_id: int, now: str) -> str:
+    """남은 이미지가 없을 때 부른다. 키워드 수집이 끝났으면 done, 아직 수집 중이면 waiting."""
+    collected = conn.execute(
+        "SELECT k.status = 'collected' FROM detection_jobs d JOIN keywords k ON k.id = d.keyword_id WHERE d.id = ?",
+        (job_id,),
+    ).fetchone()[0]
+    status = "done" if collected else "waiting"
+    conn.execute("UPDATE detection_jobs SET status = ?, finished_at = ? WHERE id = ?",
+                 (status, now if collected else None, job_id))
+    conn.commit()
+    return status
+
+
+def save_image_check(conn: sqlite3.Connection, image_id: int, check: dict, detections: list[dict], now: str) -> None:
+    """이미지 1장의 검출 결과를 한 트랜잭션으로 기록한다. 같은 이미지를 다시 검출하면 덮어쓴다.
+
+    check: image_checks 의 컬럼 값 (image_id, checked_at 제외)
+    detections: detections 의 컬럼 값 목록 (id, image_id 제외)
+    """
+    with conn:   # 중간에 예외가 나면 전부 되돌린다
+        conn.execute("DELETE FROM detections WHERE image_id = ?", (image_id,))
+        columns = ["image_id", *check, "checked_at"]
+        conn.execute(
+            f"INSERT OR REPLACE INTO image_checks ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+            [image_id, *check.values(), now],
+        )
+        for detection in detections:
+            columns = ["image_id", *detection]
+            conn.execute(
+                f"INSERT INTO detections ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                [image_id, *detection.values()],
+            )
+        conn.execute("UPDATE images SET detected_at = ? WHERE id = ?", (now, image_id))
+
+
+def detection_class_totals(conn: sqlite3.Connection) -> dict[str, int]:
+    """검출 대상 키워드 전체의 클래스별 양성 검출 수. 여러 키워드에 걸린 이미지는 한 번만 센다."""
+    totals = {str(c): 0 for c in (1, 3, 4, 5)}
+    for class_id, count in conn.execute(
+        """
+        SELECT d.class_id, COUNT(DISTINCT d.id)
+        FROM detection_jobs j
+        JOIN image_sources s ON s.keyword_id = j.keyword_id
+        JOIN detections d ON d.image_id = s.image_id
+        WHERE d.positive = 1
+        GROUP BY d.class_id
+        """
+    ):
+        totals[str(class_id)] = count
+    return totals
+
+
+def clear_image_checks(conn: sqlite3.Connection, image_ids: list[int]) -> int:
+    """검출 결과를 지우고 detected_at 을 비워 다시 검출하게 한다. 지운 이미지 수."""
+    if not image_ids:
+        return 0
+    marks = ",".join("?" * len(image_ids))
+    with conn:
+        conn.execute(f"DELETE FROM detections WHERE image_id IN ({marks})", image_ids)
+        conn.execute(f"DELETE FROM image_checks WHERE image_id IN ({marks})", image_ids)
+        return conn.execute(f"UPDATE images SET detected_at = NULL WHERE id IN ({marks})", image_ids).rowcount
+
+
+def detection_overview(conn: sqlite3.Connection) -> list[dict]:
+    """화면용: 모든 키워드의 검출 지정 여부와 진행률. 검출 대상(고른 순서)을 먼저, 나머지는 키워드 순서로."""
+    rows = conn.execute(
+        """
+        SELECT k.id, k.text, k.status AS collect_status, k.detect_hidden,
+               d.id AS job_id, d.status AS job_status, d.finished_at,
+               COUNT(DISTINCT i.id) AS images,
+               COUNT(DISTINCT CASE WHEN i.detected_at IS NOT NULL THEN i.id END) AS detected,
+               COUNT(DISTINCT CASE WHEN c.verdict = 'positive' THEN i.id END) AS positive,
+               COUNT(DISTINCT CASE WHEN c.verdict = 'error' THEN i.id END) AS errors
+        FROM keywords k
+        LEFT JOIN detection_jobs d ON d.keyword_id = k.id
+        LEFT JOIN image_sources s ON s.keyword_id = k.id
+        LEFT JOIN images i ON i.id = s.image_id AND i.path IS NOT NULL
+        LEFT JOIN image_checks c ON c.image_id = i.id
+        GROUP BY k.id
+        ORDER BY d.id IS NULL, d.id, k.sort_order
+        """
+    ).fetchall()
+    # 키워드별·클래스별 양성 검출 수 (= class{N} 폴더에 저장되는 Crop 묶음 수)
+    classes: dict[int, dict[str, int]] = {}
+    for keyword_id, class_id, count in conn.execute(
+        """
+        SELECT s.keyword_id, d.class_id, COUNT(DISTINCT d.id)
+        FROM image_sources s JOIN detections d ON d.image_id = s.image_id
+        WHERE d.positive = 1
+        GROUP BY s.keyword_id, d.class_id
+        """
+    ):
+        classes.setdefault(keyword_id, {})[str(class_id)] = count
+    return [
+        {
+            "id": row["id"], "keyword": row["text"], "collect_status": row["collect_status"],
+            "classes": {str(c): classes.get(row["id"], {}).get(str(c), 0) for c in (1, 3, 4, 5)},
+            "selected": row["job_id"] is not None, "hidden": bool(row["detect_hidden"]),
+            "job_status": row["job_status"],
+            "finished_at": row["finished_at"],   # UTC
+            "images": row["images"], "detected": row["detected"],
+            "positive": row["positive"], "errors": row["errors"],
+        }
+        for row in rows
+    ]

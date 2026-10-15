@@ -49,7 +49,7 @@ def searched_keywords(web, host: str, param: str = "query") -> list[str]:
 # ── 정상 흐름 ───────────────────────────────────────────────────────
 
 
-def test_모든_키워드와_사이트를_끝내면_검출_작업이_등록된다(make_scheduler, web, conn):
+def test_모든_사이트를_끝내면_수집_완료가_되고_검출은_자동으로_등록하지_않는다(make_scheduler, web, conn):
     fake_pexels(web, {1: [1, 2]})
     fake_pixabay(web, {1: [7]})
     web.images({"/p1": make_image(1), "/p2": make_image(2), "/x7": make_image(3)})
@@ -59,11 +59,7 @@ def test_모든_키워드와_사이트를_끝내면_검출_작업이_등록된�
 
     assert {job["status"] for job in jobs(conn).values()} == {"done"}
     assert keyword_status(conn) == {"beach": "collected", "sunset": "collected"}
-    detections = detection_jobs(conn)
-    assert detections["beach"]["status"] == "pending" and detections["beach"]["total"] == 3
-    # sunset 에서는 beach 와 같은 사진만 나왔다. 파일은 다시 받지 않지만 이 키워드에도 연결되므로
-    # (아직 검출 전인) 같은 3장이 검출 대상으로 잡힌다. 워커는 detected_at 을 보고 한 번만 처리한다.
-    assert detections["sunset"]["total"] == 3
+    assert detection_jobs(conn) == {}   # 검출할 키워드는 사용자가 화면에서 고른다
 
 
 def test_사이트는_키워드를_입력_순서대로_처리한다(make_scheduler, web, conn):
@@ -135,10 +131,9 @@ def test_인증_오류는_3번째에_실패_처리하고_키워드는_끝난_것
     assert len([seconds for seconds in clock.sleeps if seconds > 3000]) == 2   # 1시간 대기 2번 후 3번째에 포기
     assert web.count("api.pexels.com") == 3
 
-    # 실패한 사이트가 있어도 나머지가 끝났으므로 검출로 넘어간다
+    # 실패한 사이트가 있어도 나머지가 끝났으므로 수집 완료로 넘어간다
     assert jobs(conn)[("beach", "pixabay")]["status"] == "done"
     assert keyword_status(conn) == {"beach": "collected"}
-    assert detection_jobs(conn)["beach"]["total"] == 1
 
 
 def test_한_작업이_쉬는_동안_다음_키워드로_넘어간다(make_scheduler, web, conn):
@@ -216,12 +211,13 @@ def test_중단하면_작업이_pending으로_돌아가고_다시_시작하면_�
     assert job["status"] == "done" and job["downloaded"] == 2
 
 
-def test_끝난_키워드를_다시_등록하면_처음부터_다시_수집하고_검출도_다시_대기한다(make_scheduler, web, conn):
+def test_검출을_마친_키워드를_다시_수집하면_검출도_다시_열린다(make_scheduler, web, conn):
     pages = {1: [1]}
     fake_pexels(web, pages)
     web.images({"/p1": make_image(1), "/p2": make_image(2)})
     repo.add_keywords(conn, ["beach"], ["pexels"], None)
     asyncio.run(make_scheduler("pexels").run_until_idle())
+    repo.select_for_detection(conn, conn.execute("SELECT id FROM keywords").fetchone()[0])
     conn.execute("UPDATE detection_jobs SET status = 'done'")
     conn.execute("UPDATE images SET detected_at = '2026-01-01 00:00:00'")
     conn.commit()
@@ -229,12 +225,14 @@ def test_끝난_키워드를_다시_등록하면_처음부터_다시_수집하�
     pages[1] = [2, 1]                                   # 그사이 새 사진이 올라왔다
     repo.add_keywords(conn, ["beach"], ["pexels"], None)
     assert keyword_status(conn) == {"beach": "pending"}
+    assert detection_jobs(conn)["beach"]["status"] == "waiting"      # 수집하는 동안 새 이미지를 이어서 검출
     asyncio.run(make_scheduler("pexels").run_until_idle())
 
     job = jobs(conn)[("beach", "pexels")]
     assert (job["status"], job["downloaded"]) == ("done", 1)   # 새 사진 1장만 받음
-    detection = detection_jobs(conn)["beach"]
-    assert detection["status"] == "pending" and detection["total"] == 1   # 새 사진만 검출 대상
+    assert detection_jobs(conn)["beach"]["status"] == "pending"      # 수집이 끝나면 남은 것을 마무리
+    keyword_id = conn.execute("SELECT id FROM keywords").fetchone()[0]
+    assert repo.next_undetected_image(conn, keyword_id) is not None  # 새 사진 1장이 검출 대상
 
 
 def test_진행_중인_키워드를_다시_등록해도_작업을_초기화하지_않는다(conn):

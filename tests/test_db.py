@@ -37,7 +37,8 @@ def test_테이블이_모두_만들어진다(conn):
     tables = {row["name"] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     )}
-    assert tables == {"keywords", "collect_jobs", "images", "image_sources", "detection_jobs"}
+    assert tables == {"keywords", "collect_jobs", "images", "image_sources", "detection_jobs",
+                      "detector_settings", "image_checks", "detections"}
 
 
 def test_init_db는_여러_번_호출해도_데이터를_지우지_않는다(conn):

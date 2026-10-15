@@ -15,6 +15,11 @@
     POST /api/keywords/{id}/complete 수집을 여기서 마치고 수집 완료로 옮기기
     POST /api/collector/stop      수집 일시 중단
     POST /api/collector/start     수집 재개
+    GET  /api/detection           자동 검출 설정·상태와 키워드별 검출 진행률
+    PUT  /api/detection/settings  자동 검출 켜기·끄기, 동작 시간
+    POST /api/detection/keywords/{id}   검출할 키워드로 지정
+    DELETE /api/detection/keywords/{id} 검출 대상에서 빼기 (이미 검출한 결과는 남는다)
+    POST /api/detection/keywords/{id}/hide   '키워드 추가' 목록에서 숨기기 (unhide 로 다시 보이기)
     GET  /api/health              서버 상태 (살아 있는지, 수집 중인지)
     GET  /docs                    API 문서 (자동 생성)
 
@@ -33,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .db import repo
+from .detector.supervisor import DetectorSupervisor, parse_hhmm, spawn_worker
 from .instance_lock import AlreadyRunning
 from .logging_setup import setup_logging
 from .runtime import Runtime, check_source, open_runtime, parse_keywords
@@ -50,8 +56,16 @@ class OrderRequest(BaseModel):
     ids: list[int] = Field(description="예약 키워드 ID 를 수집할 순서대로", examples=[[3, 1, 2]])
 
 
-def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
-    """settings·transport 는 테스트에서만 넘긴다. 평소에는 .env 를 읽는다."""
+class DetectionSettingsRequest(BaseModel):
+    enabled: bool | None = Field(None, description="자동 검출 켜기·끄기")
+    window_start: str | None = Field(None, description="동작 시작 시각 (현지, HH:MM)", examples=["19:00"])
+    window_end: str | None = Field(None, description="동작 끝 시각 (현지, HH:MM). 시작과 같으면 하루 종일",
+                                   examples=["08:00"])
+
+
+def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None,
+               spawn_worker=spawn_worker) -> FastAPI:
+    """settings·transport·spawn_worker 는 테스트에서만 넘긴다. 평소에는 .env 를 읽는다."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -61,7 +75,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             async with open_runtime(settings or Settings.from_env(), transport) as runtime:
                 app.state.runtime = runtime
                 runtime.scheduler.start()
+                # 자동 검출: 켜져 있고 동작 시간 안이고 할 일이 있으면 검출 워커 프로세스를 띄운다
+                app.state.detector = DetectorSupervisor(runtime.conn, spawn=spawn_worker)
+                app.state.detector.start()
                 yield
+                await app.state.detector.stop()   # 띄운 워커도 끝낸다. 다음 실행 때 이어서 검출한다
                 await runtime.scheduler.stop()   # 돌던 작업은 pending 으로 돌아가 다음 실행 때 이어진다
         except AlreadyRunning as err:
             # 콘솔이 없는 실행(자동 시작)에서도 이유를 알 수 있게 로그 파일에 남기고 서버를 띄우지 않는다
@@ -173,7 +191,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         repo.set_held(runtime.conn, keyword_id, True)          # 먼저 보류해 다시 집어 들지 않게 한 뒤
         await runtime.scheduler.release_keyword(keyword_id)   # 수집 중인 작업을 멈추고 (멈춘 작업은 pending 이 된다)
         repo.finish_keyword(runtime.conn, keyword_id, to_db(runtime.scheduler.clock()))   # 남은 작업을 끝낸다
-        logging.getLogger(__name__).info("'%s' 수동 완료 — 검출 작업 등록", keyword["text"])
+        logging.getLogger(__name__).info("'%s' 수동 완료", keyword["text"])
         return {"id": keyword_id, "status": "collected"}
 
     @app.delete("/api/keywords/{keyword_id}")
@@ -207,6 +225,82 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
     async def start(request: Request):
         runtime_of(request).scheduler.start()
         return {"running": True}
+
+    # ── 자동 검출 (설계: docs/DETECTION_SPEC.md 5-1, 5-2) ─────────
+
+    def detection_state(request: Request) -> dict:
+        runtime = runtime_of(request)
+        return {
+            **request.app.state.detector.status(),
+            "save_crops": runtime.settings.detect_save_crops,
+            "save_path": str(runtime.settings.detect_save_path),
+            "keywords": repo.detection_overview(runtime.conn),
+            "class_totals": repo.detection_class_totals(runtime.conn),   # 검출 대상 전체의 클래스별 양성 수
+        }
+
+    @app.get("/api/detection")
+    async def detection(request: Request):
+        return detection_state(request)
+
+    @app.put("/api/detection/settings")
+    async def update_detection_settings(body: DetectionSettingsRequest, request: Request):
+        for value in (body.window_start, body.window_end):
+            if value is not None:
+                try:
+                    parse_hhmm(value)
+                except ValueError as err:
+                    raise HTTPException(400, str(err)) from err
+        conn = runtime_of(request).conn
+        changed = repo.update_detector_settings(
+            conn, enabled=body.enabled, window_start=body.window_start, window_end=body.window_end
+        )
+        detector = request.app.state.detector
+        if body.enabled:
+            detector.clear_retry()   # 다시 켜면 비정상 종료 뒤의 10분 대기도 풀어 준다
+        detector.wake()
+        logging.getLogger(__name__).info(
+            "자동 검출 %s, 동작 시간 %s~%s", "켬" if changed["enabled"] else "끔",
+            changed["window_start"], changed["window_end"],
+        )
+        return detection_state(request)
+
+    def existing_keyword(runtime: Runtime, keyword_id: int):
+        keyword = repo.get_keyword(runtime.conn, keyword_id)
+        if keyword is None:
+            raise HTTPException(404, f"없는 키워드: {keyword_id}")
+        return keyword
+
+    @app.post("/api/detection/keywords/{keyword_id}")
+    async def select_detection_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = existing_keyword(runtime, keyword_id)
+        repo.select_for_detection(runtime.conn, keyword_id)
+        request.app.state.detector.wake()
+        logging.getLogger(__name__).info("'%s' 검출 대상으로 지정", keyword["text"])
+        return {"id": keyword_id, "selected": True}
+
+    @app.post("/api/detection/keywords/{keyword_id}/hide")
+    async def hide_detection_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        existing_keyword(runtime, keyword_id)
+        repo.set_detect_hidden(runtime.conn, keyword_id, True)
+        return {"id": keyword_id, "hidden": True}
+
+    @app.post("/api/detection/keywords/{keyword_id}/unhide")
+    async def unhide_detection_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        existing_keyword(runtime, keyword_id)
+        repo.set_detect_hidden(runtime.conn, keyword_id, False)
+        return {"id": keyword_id, "hidden": False}
+
+    @app.delete("/api/detection/keywords/{keyword_id}")
+    async def unselect_detection_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = existing_keyword(runtime, keyword_id)
+        if not repo.unselect_for_detection(runtime.conn, keyword_id):
+            raise HTTPException(404, f"검출 대상이 아닌 키워드입니다: {keyword['text']}")
+        logging.getLogger(__name__).info("'%s' 검출 대상에서 뺌", keyword["text"])
+        return {"id": keyword_id, "selected": False}
 
     return app
 

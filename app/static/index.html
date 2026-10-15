@@ -70,6 +70,13 @@
   ol.keywords .empty { color:var(--muted); font-size:13px; }
   ol.keywords .empty::before { content:none; }
   button.danger { color:var(--bad); }
+  .switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; font-weight:bold; }
+  .switch input { width:18px; height:18px; accent-color:var(--accent); }
+  input[type=time] { padding:6px 8px; border:1px solid var(--line); border-radius:8px;
+         background:var(--bg); color:var(--text); font:inherit; }
+  #detect-state { font-size:14px; }
+  ol.keywords .bar { display:flex; align-items:center; gap:6px; font-size:13px; }
+  .pill { font-size:12px; padding:0 7px; border-radius:999px; border:1px solid currentColor; }
 </style>
 </head>
 <body>
@@ -91,6 +98,43 @@
     </div>
     <div id="limit" class="muted"></div>
     <div id="message"></div>
+  </section>
+
+  <section id="detect-card">
+    <h2>자동 검출</h2>
+    <div class="row" style="margin-bottom:8px">
+      <label class="switch"><input id="detect-enabled" type="checkbox"> 켜기</label>
+      <span class="row" style="gap:6px">
+        <label for="detect-start" class="muted">동작 시간</label>
+        <input id="detect-start" type="time" aria-label="동작 시작 시각">
+        <span class="muted">~</span>
+        <input id="detect-end" type="time" aria-label="동작 끝 시각">
+        <button id="detect-save-window" class="small">시간 저장</button>
+      </span>
+      <span id="detect-state"></span>
+    </div>
+    <p id="detect-hint" class="hint"></p>
+    <div id="detect-totals" class="row" style="margin-bottom:8px; gap:6px"></div>
+    <div class="tabs" role="tablist" data-group="detect">
+      <button id="tab-detect-selected" role="tab" data-tab="selected" aria-controls="panel-detect-selected">검출 대상<span class="count" id="count-detect-selected"></span></button>
+      <button id="tab-detect-others" role="tab" data-tab="others" aria-controls="panel-detect-others">키워드 추가<span class="count" id="count-detect-others"></span></button>
+      <button id="tab-detect-hidden" role="tab" data-tab="hidden" aria-controls="panel-detect-hidden">숨김<span class="count" id="count-detect-hidden"></span></button>
+    </div>
+    <div id="panel-detect-selected" role="tabpanel" data-group="detect" data-tab="selected" aria-labelledby="tab-detect-selected">
+      <p class="hint">위에서부터 차례로 검출합니다. 수집 중인 키워드는 새로 받은 이미지를 이어서 검출합니다.</p>
+      <ol id="detect-selected" class="keywords"></ol>
+      <nav id="detect-selected-pager" class="pager" aria-label="검출 대상 키워드 페이지"></nav>
+    </div>
+    <div id="panel-detect-others" role="tabpanel" data-group="detect" data-tab="others" aria-labelledby="tab-detect-others" hidden>
+      <p class="hint">검출할 키워드를 고르세요. 수집 중인 키워드도 고를 수 있습니다. 검출하지 않을 키워드는 숨겨 둘 수 있습니다.</p>
+      <ol id="detect-others" class="keywords"></ol>
+      <nav id="detect-others-pager" class="pager" aria-label="검출할 수 있는 키워드 페이지"></nav>
+    </div>
+    <div id="panel-detect-hidden" role="tabpanel" data-group="detect" data-tab="hidden" aria-labelledby="tab-detect-hidden" hidden>
+      <p class="hint">'키워드 추가' 목록에서 숨긴 키워드입니다. 수집에는 영향이 없습니다.</p>
+      <ol id="detect-hidden" class="keywords"></ol>
+      <nav id="detect-hidden-pager" class="pager" aria-label="숨긴 키워드 페이지"></nav>
+    </div>
   </section>
 
   <section>
@@ -151,14 +195,17 @@ const STATUS = {
   collecting: ["수집 중", "ok"], collected: ["수집 완료", "ok"],
 };
 // 화면 상태: 고른 탭과 탭별 페이지. 탭은 브라우저에 기억해 새로고침해도 유지한다.
-const PAGE_SIZE = { progress: 20, queuedList: 10, collectedList: 10 };   // 한 페이지에 보여 줄 키워드 수
+const PAGE_SIZE = { progress: 20, queuedList: 10, collectedList: 10, detect: 10 };   // 한 페이지에 보여 줄 키워드 수
 const remember = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
 const view = {
   list: remember("tab:list", "queued"),
   progress: remember("tab:progress", "active"),
-  page: { active: 1, collected: 1, queuedList: 1, collectedList: 1 },   // 진행 상황 두 탭 + 키워드 목록 두 탭
+  detect: remember("tab:detect", "selected"),
+  // 진행 상황 두 탭 + 키워드 목록 두 탭 + 자동 검출 두 탭
+  page: { active: 1, collected: 1, queuedList: 1, collectedList: 1, detectSelected: 1, detectOthers: 1, detectHidden: 1 },
 };
-let lastData = null;   // 탭·페이지를 바꿀 때 서버를 다시 부르지 않고 바로 다시 그린다
+let lastData = null;     // 탭·페이지를 바꿀 때 서버를 다시 부르지 않고 바로 다시 그린다
+let lastDetect = null;
 
 function showTabs() {
   for (const tab of document.querySelectorAll("[role=tab]")) {
@@ -180,6 +227,7 @@ for (const tab of document.querySelectorAll("[role=tab]")) {
     try { localStorage.setItem(`tab:${group}`, view[group]); } catch {}
     showTabs();
     if (lastData) render(lastData);
+    if (lastDetect) renderDetect(lastDetect);
   };
 }
 
@@ -193,7 +241,8 @@ function paginate(items, key, size, pagerId) {
     el("span", { className: "total", textContent: `키워드 ${items.length.toLocaleString()}개 중 ${range}` }),
     ...(pages > 1 ? pagerButtons(page, pages, (n) => {
       view.page[key] = n;
-      render(lastData);
+      if (lastData) render(lastData);
+      if (lastDetect) renderDetect(lastDetect);
       $(pagerId).closest("section").scrollIntoView({ block: "nearest" });
     }) : []));
   return { slice: items.slice(start, start + size), start };
@@ -282,7 +331,7 @@ function queuedItem(keyword, index, queued) {
         : button("보류", `${name} 보류`, () => send(`/api/keywords/${keyword.id}/hold`, { method: "POST" })),
       button("완료", `${name} 수집 완료로 옮기기`, () => {
         if (confirm(`'${name}' 키워드의 수집을 여기서 마칠까요?
-남은 사이트 수집을 멈추고 수집 완료로 옮깁니다. 받은 이미지는 그대로 남고 검출 작업이 등록됩니다.`))
+남은 사이트 수집을 멈추고 수집 완료로 옮깁니다. 받은 이미지는 그대로 남습니다.`))
           send(`/api/keywords/${keyword.id}/complete`, { method: "POST" });
       }, { className: "small finish" }),
       button("삭제", `${name} 삭제`, () => {
@@ -395,12 +444,133 @@ function render(data) {
   renderProgress(groups);
 }
 
+// ── 자동 검출 ────────────────────────────────────────────────────
+// 스위치가 켜져 있고 동작 시간 안이면 서버가 검출 워커를 띄운다. 끄면 지금 이미지만 마치고 멈춘다.
+
+const DETECT_STATE = {
+  running: ["검출 중", "ok"], off: ["꺼짐", "muted"], outside: ["동작 시간 밖", "muted"],
+  idle: ["검출할 이미지 없음", "muted"], starting: ["곧 시작", "ok"], retry: ["오류로 멈춤", "bad"],
+};
+const JOB_STATE = {
+  pending: ["대기", "muted"], running: ["검출 중", "ok"], waiting: ["새 이미지 기다리는 중", "muted"], done: ["완료", "ok"],
+};
+let windowEdited = false;   // 시각을 고치는 중에는 3초 새로고침이 입력값을 덮지 않게 한다
+
+async function refreshDetect() {
+  try {
+    lastDetect = await api("/api/detection");
+    renderDetect(lastDetect);
+  } catch (error) { $("detect-state").textContent = "검출 상태를 불러올 수 없음"; }
+}
+
+function renderDetect(data) {
+  $("detect-enabled").checked = data.enabled;
+  if (!windowEdited) {
+    $("detect-start").value = data.window_start;
+    $("detect-end").value = data.window_end;
+  }
+  const [label, cls] = DETECT_STATE[data.state] || [data.state, ""];
+  let detail = "";
+  if (data.state === "outside") detail = ` · ${data.window_start}에 시작`;
+  if (data.state === "retry") detail = ` · 워커 비정상 종료(코드 ${data.last_exit.code}, ${data.last_exit.at}), ${data.retry_after}에 다시 시도`;
+  $("detect-state").replaceChildren(el("span", { className: `pill ${cls}`, textContent: label }),
+    el("span", { className: "muted", textContent: detail }));
+  $("detect-hint").textContent = data.save_crops
+    ? `양성 이미지는 ${data.save_path}\\날짜_dataset 폴더에 원본·Crop·metadata 로 저장합니다.`
+    : "결과 파일을 저장하지 않습니다 (.env 의 DETECT_SAVE_CROPS=false). 결과는 DB 에만 남습니다.";
+
+  $("detect-totals").replaceChildren(
+    el("span", { className: "muted", textContent: "검출 대상 전체 양성 검출" }), classTags(data.class_totals));
+
+  const selected = data.keywords.filter((k) => k.selected);
+  const others = data.keywords.filter((k) => !k.selected && !k.hidden);
+  const hidden = data.keywords.filter((k) => !k.selected && k.hidden);
+  $("count-detect-selected").textContent = selected.length;
+  $("count-detect-others").textContent = others.length;
+  $("count-detect-hidden").textContent = hidden.length;
+  const empty = (text) => el("li", { className: "empty", textContent: text });
+
+  const a = paginate(selected, "detectSelected", PAGE_SIZE.detect, "detect-selected-pager");
+  $("detect-selected").style.counterReset = `kw ${a.start}`;
+  $("detect-selected").replaceChildren(...(a.slice.length ? a.slice.map(detectItem)
+    : [empty("검출할 키워드가 없습니다. '키워드 추가' 탭에서 고르세요.")]));
+  const b = paginate(others, "detectOthers", PAGE_SIZE.detect, "detect-others-pager");
+  $("detect-others").style.counterReset = `kw ${b.start}`;
+  $("detect-others").replaceChildren(...(b.slice.length ? b.slice.map(detectItem) : [empty("추가할 키워드가 없습니다.")]));
+  const c = paginate(hidden, "detectHidden", PAGE_SIZE.detect, "detect-hidden-pager");
+  $("detect-hidden").style.counterReset = `kw ${c.start}`;
+  $("detect-hidden").replaceChildren(...(c.slice.length ? c.slice.map(detectItem) : [empty("숨긴 키워드가 없습니다.")]));
+}
+
+// 클래스별 양성 검출 수. 결과 폴더의 class1·3·4·5 와 같은 이름으로 보여 주고, 마우스를 올리면 YOLO 라벨을 보여 준다
+const CLASS_LABELS = { 1: "EXPOSED_BREAST_F", 3: "EXPOSED_BUTTOCKS", 4: "EXPOSED_GENITALIA_F", 5: "EXPOSED_GENITALIA_M" };
+const classTags = (counts) => el("span", { className: "tags" }, ...Object.entries(CLASS_LABELS).map(([id, label]) =>
+  el("span", {
+    className: "tag", title: `${label}: 양성 검출 ${(counts[id] || 0).toLocaleString()}건`,
+    textContent: `class${id} ${(counts[id] || 0).toLocaleString()}`,
+  })));
+
+function detectItem(keyword) {
+  const name = keyword.keyword;
+  const [collectLabel] = STATUS[keyword.collect_status] || [keyword.collect_status];
+  const parts = [el("span", { className: "kw", textContent: name }),
+                 el("span", { className: "meta muted", textContent: collectLabel })];
+  if (keyword.selected) {
+    const [label, cls] = JOB_STATE[keyword.job_status] || [keyword.job_status, ""];
+    parts.push(
+      el("span", { className: `meta ${cls}`, textContent: label }),
+      el("span", { className: "bar" },
+        el("progress", { max: Math.max(keyword.images, 1), value: keyword.detected }),
+        `${keyword.detected.toLocaleString()} / ${keyword.images.toLocaleString()}`),
+      el("span", { className: "meta ok", textContent: `양성 ${keyword.positive.toLocaleString()}` }),
+      classTags(keyword.classes),
+      ...(keyword.errors ? [el("span", { className: "meta bad", textContent: `오류 ${keyword.errors}` })] : []),
+      el("span", { className: "actions" }, button("빼기", `${name} 검출 대상에서 빼기`, () => {
+        if (confirm(`'${name}' 키워드를 검출 대상에서 뺄까요?\n이미 검출한 결과와 저장한 파일은 남습니다.`))
+          sendDetect(`/api/detection/keywords/${keyword.id}`, { method: "DELETE" });
+      }, { className: "small danger" })));
+  } else if (keyword.hidden) {
+    parts.push(
+      el("span", { className: "meta muted", textContent: `${keyword.images.toLocaleString()}장` }),
+      el("span", { className: "actions" }, button("다시 보이기", `${name} 키워드 추가 목록에 다시 보이기`,
+        () => sendDetect(`/api/detection/keywords/${keyword.id}/unhide`, { method: "POST" }))));
+  } else {
+    parts.push(
+      el("span", { className: "meta muted", textContent: `${keyword.images.toLocaleString()}장` }),
+      el("span", { className: "actions" },
+        button("검출하기", `${name} 검출 대상에 추가`,
+          () => sendDetect(`/api/detection/keywords/${keyword.id}`, { method: "POST" }), { className: "small finish" }),
+        button("숨기기", `${name} 키워드 추가 목록에서 숨기기`,
+          () => sendDetect(`/api/detection/keywords/${keyword.id}/hide`, { method: "POST" }))));
+  }
+  return el("li", {}, ...parts);
+}
+
+const sendDetect = async (path, options = {}) => {
+  try {
+    await api(path, { headers: { "Content-Type": "application/json" }, ...options });
+    refreshDetect();
+  } catch (error) { say(error.message, "bad"); }
+};
+
+const saveDetectSettings = (body) =>
+  sendDetect("/api/detection/settings", { method: "PUT", body: JSON.stringify(body) });
+
+$("detect-enabled").onchange = (event) => saveDetectSettings({ enabled: event.target.checked });
+for (const id of ["detect-start", "detect-end"]) $(id).oninput = () => { windowEdited = true; };
+$("detect-save-window").onclick = async () => {
+  windowEdited = false;
+  await saveDetectSettings({ window_start: $("detect-start").value, window_end: $("detect-end").value });
+};
+
 showTabs();
 $("submit").onclick = submit;
 $("keywords").onkeydown = (event) => { if (event.key === "Enter") submit(); };
 loadSites();
 refresh();
+refreshDetect();
 setInterval(refresh, 3000);
+setInterval(refreshDetect, 3000);
 </script>
 </body>
 </html>

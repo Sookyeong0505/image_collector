@@ -10,9 +10,10 @@
 | 항목 | 내용 |
 |---|---|
 | 목적 | 모델이 이미지마다 자동으로 판정. 사람 검수 기능은 나중에 추가 |
-| 입력 | 수집기가 모은 이미지 (`images` 테이블). 수집기가 `detection_jobs`에 등록한 키워드 단위로 처리 |
+| 입력 | 수집기가 모은 이미지 (`images` 테이블). **사용자가 고른 키워드**만 처리 (수집 중인 키워드도 가능) |
 | 실행 환경 | Windows 10, Python 3.12, RAM 8GB, RTX 2060 (VRAM 6GB), i5-10400F |
-| 프로세스 | 수집기(FastAPI)와 분리된 **검출 워커 프로세스** 1개. 두 프로세스는 SQLite(WAL)로만 연결 |
+| 프로세스 | 수집기(FastAPI)와 분리된 **검출 워커 프로세스** 1개. 수집기가 켜기 설정과 동작 시간에 맞춰 워커를 띄움. 두 프로세스는 SQLite(WAL)로만 연결 |
+| 운영 | 퇴근 뒤 자동 검출. 화면의 스위치와 동작 시간(기본 19:00~08:00)으로 조절 |
 | 모델 | YOLOv8n ONNX(`best_640n_0522.onnx`, Ultralytics 8.0.196), SwinV2-large·DINOv2-large 백본 + 클래스별 linear head |
 | 범위 밖 | OpenCLIP 분류기(reference에서도 호출되지 않음), head 재학습, 사람 검수 화면 |
 
@@ -75,7 +76,7 @@ reference에서 4조건은 "검수 폴더에 저장할 후보"를 고르는 기�
 | 결과 기록 | `metadata.jsonl` | SQLite `image_checks`, `detections` | 없음 |
 | Crop 미리보기 | base64로 응답 | 만들지 않음 | 없음 |
 | 저장 옵션 | 화면 체크박스 (기본 꺼짐) | `.env`의 `DETECT_SAVE_CROPS` (기본 켜짐) | 없음 |
-| 저장 폴더 | `server/dataset/` 하나에 계속 쌓음 | 검출한 날짜별 `YYYYMMDD_dataset/` (5-3) | 없음. 파일 이름은 같고 `review_pending` 폴더 단계만 없음 |
+| 저장 폴더 | `server/dataset/` 하나에 계속 쌓음 | 검출한 날짜별 `YYYYMMDD_dataset/` (5-5) | 없음. 파일 이름은 같고 `review_pending` 폴더 단계만 없음 |
 
 ## 4. 구조
 
@@ -102,8 +103,8 @@ flowchart TB
     OUT[("YYYYMMDD_dataset/<br/>Crop · 원본 사본 · metadata")]
     MD[("models/<br/>ONNX · head .pt")]
 
-    SCH -->|"키워드 완료 시 등록"| DB
-    API -.->|"진행률 조회"| DB
+    API -->|"키워드 지정 · 켜기 · 동작 시간"| DB
+    SUP["워커 관리<br/>(수집기 안)"] -.->|"켜짐 + 동작 시간 + 할 일 있음<br/>→ 워커 실행"| WK
     DB -->|detection_jobs| WK
     WK -->|"image_checks · detections<br/>images.detected_at"| DB
     IMG --> PL
@@ -121,7 +122,9 @@ app/detector/
 ├── crops.py         ← app.py: crop_detection, safe_stem, 파일 이름 규칙
 ├── verifiers.py     ← pipelines/{swinv2,dinov2}/verifier.py + common.py의 BinaryLinearHead, pool_output
 ├── pipeline.py      ← App.tsx collect() 루프 + app.py collect()의 판정 부분 (DB·파일 없이 순수 계산)
-└── worker.py        새로 작성: detection_jobs 처리, DB 기록, 파일 저장, 에러 처리
+├── worker.py        새로 작성: detection_jobs 처리, DB 기록, 에러 처리
+├── dataset.py       새로 작성: 날짜 폴더에 원본 사본·Crop·metadata 저장
+└── supervisor.py    새로 작성: 수집기 안에서 켜기 설정·동작 시간을 보고 워커를 띄움 (torch 를 불러오지 않음)
 models/              (git에 올리지 않음)
 ├── yolo/best_640n_0522.onnx
 ├── swinv2/run_20260915_161151/class{1,3,4,5}_head.pt
@@ -129,7 +132,7 @@ models/              (git에 올리지 않음)
 ```
 
 - SwinV2와 DINOv2 verifier는 거의 같은 코드입니다. 다른 점은 백본 이름, 특징을 꺼내는 방법(SwinV2는 토큰 평균, DINOv2는 CLS 토큰), 허용하는 `inputScale` 세 가지뿐입니다. 그래서 클래스 하나로 합치고 이 셋을 인자로 받습니다.
-- `pipeline.py`는 DB와 파일을 모르는 순수 함수로 둡니다. 덕분에 테스트하기 쉽고, 5-1의 비교 검증에도 그대로 씁니다.
+- `pipeline.py`는 DB와 파일을 모르는 순수 함수로 둡니다. 덕분에 테스트하기 쉽고, 9-2의 비교 검증에도 그대로 씁니다.
 - 학습용 함수(`extract_or_load_features`, `select_threshold` 등)는 옮기지 않습니다.
 
 ### 4-2. 이미지 1장의 처리
@@ -152,39 +155,88 @@ flowchart TD
 
 ## 5. 검출 워커
 
-### 5-1. 작업 흐름
+### 5-1. 검출할 키워드 지정
+
+수집이 끝나도 **자동으로 검출하지 않습니다.** 사용자가 화면에서 고른 키워드만 검출합니다.
+
+- **수집 중인 키워드도 고를 수 있습니다.** 지금까지 받은 이미지부터 검출하고, 새로 받은 이미지는 다음 확인 때 이어서 검출합니다.
+- 고른 키워드 하나가 `detection_jobs` 1행입니다. 고른 순서(`id` 순)대로 처리합니다.
+- 키워드를 빼면 그 행을 지웁니다. 이미 검출한 결과(`image_checks`, `detections`, 저장 파일)는 남습니다.
+- 수집기는 더 이상 `detection_jobs`를 만들지 않습니다(F12 변경). 이미 고른 키워드를 다시 수집하면 검출도 다시 이어집니다.
+
+검출 작업의 상태는 다음과 같습니다.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : 사용자가 키워드 지정
+    pending --> running : 워커가 가져감
+    running --> waiting : 남은 이미지 없음, 키워드는 아직 수집 중
+    waiting --> running : 새 이미지가 들어옴
+    running --> done : 남은 이미지 없음, 키워드 수집 완료
+    done --> pending : 키워드를 다시 수집해서 끝남
+    running --> pending : 꺼짐 · 동작 시간 끝 · 워커 종료
+```
+
+진행률(검출한 장수 / 전체 장수, 양성 장수)은 저장하지 않고 조회할 때 `images`와 `image_checks`에서 셉니다. 같은 이미지가 여러 키워드에 걸려 있어 저장한 숫자는 쉽게 어긋나기 때문입니다.
+
+### 5-2. 켜기 · 끄기와 동작 시간
+
+퇴근한 뒤에만 검출하도록 **스위치**와 **동작 시간**을 둡니다. 둘 다 DB(`detector_settings`)에 저장하므로 재부팅해도 유지됩니다.
+
+| 설정 | 의미 | 기본값 |
+|---|---|---|
+| 스위치 | 꺼져 있으면 검출하지 않음 | 꺼짐 |
+| 동작 시간 | 이 시간 안에서만 검출. 시작이 끝보다 늦으면 자정을 넘는 구간 (19:00~08:00). 시작과 끝이 같으면 하루 종일 | 19:00 ~ 08:00 |
+
+```mermaid
+flowchart LR
+    T(["30초마다<br/>또는 설정을 바꾸면"]) --> C{"스위치 켜짐<br/>+ 동작 시간 안<br/>+ 검출할 이미지 있음?"}
+    C -->|예, 워커 없음| S["워커 프로세스 실행<br/>python -m app detect"]
+    C -->|아니오| W["워커는 지금 이미지를 마치고<br/>스스로 종료"]
+```
+
+- **워커는 수집기(`serve`)가 띄웁니다.** 그래서 자동 시작 작업은 지금처럼 수집기 하나만 등록하면 됩니다.
+- 근무 시간에는 워커 프로세스가 없습니다. 백본이 쓰는 VRAM 약 2GB, RAM 약 1.3GB를 그동안 다른 일에 쓸 수 있습니다.
+- 워커는 이미지 1장마다 같은 조건을 다시 봅니다. 스위치를 끄거나 08:00이 되면 **지금 이미지만 마치고**(1초 안팎) 종료합니다.
+- 할 일이 없어도 워커는 종료합니다. 새 이미지가 들어오면 수집기가 다시 띄웁니다. 띄울 때마다 백본을 올리는 데 10초쯤 걸리지만, 쉬는 동안 메모리를 차지하지 않습니다.
+- 워커가 비정상 종료하면(모델 파일 없음 등) 수집기는 **10분** 뒤에 다시 띄우고, 화면에 마지막 종료 이유를 보여 줍니다.
+- 시간은 PC의 현지 시각(한국 시간)으로 판단합니다.
+- 직접 실행할 때는 `python -m app detect`(스위치·동작 시간을 따름), `python -m app detect --now`(무시하고 지금 바로, 할 일이 없으면 종료)를 씁니다.
+
+### 5-3. 작업 흐름 (워커 1회 실행)
 
 ```mermaid
 flowchart TD
     ST(["python -m app detect"]) --> LK["잠금 파일 획득<br/>(워커는 하나만)"]
     LK --> RC["running으로 남은 작업 → pending"]
-    RC --> MD["모델 파일 확인<br/>(없으면 안내 후 종료)"]
-    MD --> PK{"pending 작업 있나?<br/>(id 순)"}
-    PK -->|없음| SL["30초 대기"] --> PK
-    PK -->|있음| RN["작업 running"]
-    RN --> NX{"이 키워드 이미지 중<br/>detected_at이 빈 것?"}
-    NX -->|있음| ONE["1장 처리 → 결과 기록<br/>detected_at, processed += 1"]
-    ONE --> NX
-    NX -->|없음| DN["작업 done"] --> PK
+    RC --> MD["모델 읽기<br/>(없으면 안내 후 종료)"]
+    MD --> OK{"켜짐 + 동작 시간 안?"}
+    OK -->|아니오| END(["종료"])
+    OK -->|예| PK{"검출할 이미지가 있는<br/>작업? (id 순)"}
+    PK -->|없음| END
+    PK -->|있음| ONE["다음 이미지 1장 처리<br/>파일 저장 → DB 기록"]
+    ONE --> OK
 ```
 
-- 이미지 1장의 결과(`image_checks`, `detections`, `detected_at`, `processed`)는 **한 트랜잭션**으로 기록합니다. 중간에 죽어도 `detected_at`이 빈 이미지부터 다시 하면 됩니다.
-- 같은 이미지가 여러 키워드에 걸려 있으면 처음 한 번만 검출합니다. 이미 `detected_at`이 있으면 다른 키워드 작업에서는 건너뜁니다.
-- 백본은 처음 쓸 때 한 번 올리고(reference와 같은 lazy loading), 워커가 끝날 때까지 재사용합니다.
+- 이미지 1장의 DB 기록(`image_checks`, `detections`, `images.detected_at`)은 **한 트랜잭션**입니다. 중간에 죽어도 `detected_at`이 빈 이미지부터 다시 하면 됩니다.
+- 같은 이미지가 여러 키워드에 걸려 있으면 처음 한 번만 검출합니다.
+- 작업에 남은 이미지가 없으면, 키워드가 수집 완료면 `done`, 아직 수집 중이면 `waiting`으로 둡니다.
 - 워커 잠금은 수집기 잠금과 다른 파일(`pipeline.db.detect.lock`)을 씁니다. 그래서 수집기와 워커는 동시에 돌 수 있고, 워커끼리는 하나만 돕니다.
+- 워커 로그는 `logs/detector.log`에 남깁니다.
 
-### 5-2. 에러 처리
+### 5-4. 에러 처리
 
 | 상황 | 처리 | 기록 |
 |---|---|---|
 | 이미지 파일이 없거나 깨짐 | 그 장만 `error`로 기록하고 다음 장으로 | `image_checks.error`, 로그 |
-| 모델 파일 없음, 백본 다운로드 실패 | 워커를 시작하지 않고 안내 | 로그 |
-| 예상 못한 예외 (GPU 메모리 부족 등) | 그 장은 `error`. **5장 연속**이면 작업을 pending으로 되돌리고 10분 쉰 뒤 재개 | 로그 |
-| 프로세스 종료 | 재시작 시 `running` 작업을 `pending`으로 되돌리고 이어서 처리 | — |
+| 모델 파일 없음, 백본 다운로드 실패 | 워커 종료(코드 1). 수집기가 10분 뒤 다시 띄움 | 로그, 화면 |
+| 예상 못한 예외 (GPU 메모리 부족 등) | 그 장은 `error`. **5장 연속**이면 워커 종료(코드 1) → 10분 뒤 재시작 | 로그, 화면 |
+| 프로세스 종료 | 다음 실행 때 `running` 작업을 `pending`으로 되돌리고 이어서 처리 | — |
+| 수집기 종료 | 수집기가 띄운 워커도 함께 종료 | — |
 
 `error`로 기록한 이미지도 `detected_at`을 채웁니다. 그래야 같은 이미지에서 무한히 실패하지 않습니다. 다시 검출하려면 `detected_at`을 비우면 됩니다.
 
-### 5-3. 결과 파일
+### 5-5. 결과 파일
 
 `DETECT_SAVE_CROPS=true`이고 양성 검출이 있을 때만 저장합니다.
 결과는 팀원에게 파일로 보내기 때문에, **검출한 날짜별 폴더**(`YYYYMMDD_dataset`)로 나눠 저장합니다.
@@ -217,7 +269,31 @@ flowchart TD
 
 ## 6. 데이터 스키마 추가
 
-스키마 버전을 3에서 4로 올립니다. 기존 테이블은 바꾸지 않고 테이블 두 개만 추가합니다.
+스키마 버전을 3에서 4로 올립니다. 검출 결과 테이블 두 개와 설정 테이블 하나를 추가하고, `detection_jobs`를 새 상태에 맞게 다시 만듭니다.
+
+```sql
+-- 사용자가 검출하라고 고른 키워드 1개 = 1행
+CREATE TABLE IF NOT EXISTS detection_jobs (
+    id          INTEGER PRIMARY KEY,
+    keyword_id  INTEGER NOT NULL UNIQUE REFERENCES keywords(id) ON DELETE CASCADE,
+    status      TEXT    NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'running', 'waiting', 'done')),
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    started_at  TEXT,
+    finished_at TEXT
+);
+
+-- 자동 검출 설정. 항상 1행만 있다.
+CREATE TABLE IF NOT EXISTS detector_settings (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled      INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    window_start TEXT    NOT NULL DEFAULT '19:00',   -- 현지 시각 HH:MM
+    window_end   TEXT    NOT NULL DEFAULT '08:00'
+);
+```
+
+**버전 3 → 4 변환:** 예전 `detection_jobs`는 수집이 끝난 모든 키워드를 자동으로 담고 있었습니다. 워커가 없어서 처리된 적은 없습니다. 새 규칙(사용자가 고른 키워드만)과 맞지 않으므로 **테이블을 지우고 빈 상태로 다시 만듭니다.**
+
 
 ```sql
 -- 이미지 1장의 검출 요약. 다시 검출하면 덮어쓴다.
@@ -360,10 +436,10 @@ Chrome은 이미지를 크게 줄일 때 절반씩 줄인 사본(밉맵)을 미�
 | 2 | 완료 | `skin.py`, `crops.py`: 피부색 필터, 좌표 변환, 3배율 Crop | 단위 테스트 |
 | 3 | 완료 | `verifiers.py`: head 로드, 백본 lazy 로딩, 점수 계산 | head 로드 테스트. 측정: VRAM 약 2GB, 프로세스 RAM 약 1.25GB, 검출 1건당 약 130ms (RTX 2060) |
 | 4 | 완료 | `pipeline.py` 조립, 이미지 1장 디버그 명령 `python -m app detect-one <파일>`, 리사이즈를 Canvas 방식으로 맞춤 | 9-2 동등성 비교: 판정 일치 98.7%, YOLO 점수 차이 평균 0.009 |
-| 5 | 대기 | 스키마 v4, repo 함수, `worker.py`(작업 루프·재시작 복구·에러 정책), 잠금 | DB·워커 단위 테스트 (가짜 파이프라인) |
-| 6 | 대기 | 날짜 폴더(`YYYYMMDD_dataset`)에 결과 파일·metadata 저장, `python -m app detect` 명령 | 날짜 계산 단위 테스트(자정 경계 포함) + 실제 키워드 1개 처리 후 DB·폴더 확인 |
-| 7 | 대기 | 진행 화면과 `/api/progress`에 검출 진행률·양성 수 추가 | 브라우저에서 수집 → 검출 진행 확인 |
-| 8 | 대기 | 무인 운영: 자동 시작 스크립트에 워커 추가, 수집기와 동시 실행 | 하룻밤 실행, 메모리 사용량 확인 |
+| 5 | 완료 | 스키마 v4, repo 함수, `worker.py`(작업 루프·재시작 복구·에러 정책), 잠금, 키워드 지정, 켜기·동작 시간(`supervisor.py`) | DB·워커·워커 관리 단위 테스트 (가짜 파이프라인·가짜 시계) |
+| 6 | 완료 | 날짜 폴더(`YYYYMMDD_dataset`)에 결과 파일·metadata 저장, `python -m app detect [--now]` 명령 | 저장 단위 테스트 + 테스트 DB 로 키워드 2개(26장) 실제 검출, 폴더·metadata 확인 |
+| 7 | 완료 | 진행 화면에 `자동 검출` 칸 (스위치, 동작 시간, 키워드 지정, 진행률·양성 수), `/api/detection` | 브라우저에서 지정 → 켜기 → 검출 → 완료·대기 확인. 수집 중 키워드에 새 이미지가 들어오면 15초 안에 이어서 검출 |
+| 8 | 대기 | 무인 운영: 워커는 수집기가 띄우므로 자동 시작 스크립트는 그대로. 실제 DB 로 하룻밤 실행 | 하룻밤 실행, 메모리 사용량·결과 폴더 확인 |
 | 9 | 대기 | README, 이 문서 정리 | — |
 
 1~4단계는 DB 없이 이미지 → 판정만 다룹니다. 판정이 reference와 같다는 것을 먼저 확인한 다음에 워커를 붙이는 순서입니다. 판정이 틀린 상태로 워커부터 만들면, 나중에 틀린 이유가 로직인지 저장 과정인지 가리기 어렵기 때문입니다.
