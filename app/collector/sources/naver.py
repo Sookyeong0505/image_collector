@@ -15,6 +15,7 @@ from .base import Page, Source
 API_BASE = "https://naverapihub.apigw.ntruss.com/search/v1/image"
 DISPLAY = 100     # 한 번에 불러올 개수 (최대 100)
 MAX_START = 1000  # start 파라미터 최대값
+REACHABLE = MAX_START + DISPLAY - 1  # start=1000 페이지까지 받으면 1099장이 끝이다
 
 
 class Naver(Source):
@@ -47,7 +48,8 @@ class Naver(Source):
         next_start = int(cursor) + DISPLAY
         return Page(
             items=data.get("items") or [],
-            total=data.get("total"),
+            # total 은 수백만이 나오기도 하지만 API 로 닿는 것은 앞쪽 1099장뿐이다
+            total=min(data["total"], REACHABLE) if data.get("total") is not None else None,
             next_cursor=str(next_start) if next_start <= MAX_START else None,
         )
 

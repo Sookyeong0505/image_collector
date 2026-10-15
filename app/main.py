@@ -38,7 +38,6 @@ INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 class JobRequest(BaseModel):
     keywords: str = Field(description="쉼표로 구분한 키워드", examples=["beach, sunset"])
     sites: list[str] = Field(description="수집할 사이트", examples=[["pexels", "naver"]])
-    target_count: int | None = Field(default=None, gt=0, description="키워드×사이트당 최대 장수. 비우면 .env 의 MAX_DOWNLOADS")
 
 
 def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -103,14 +102,18 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             raise HTTPException(400, f"사용할 수 없는 사이트(키 없음 또는 오타): {', '.join(unusable)}")
 
         sites = list(dict.fromkeys(body.sites))
-        repo.add_keywords(runtime.conn, keywords, sites, body.target_count or runtime.settings.target_count)
+        repo.add_keywords(runtime.conn, keywords, sites, runtime.settings.target_count)
         runtime.scheduler.wake()   # 잠든 사이트 태스크를 깨운다
         return {"keywords": keywords, "sites": sites}
 
     @app.get("/api/progress")
     async def progress(request: Request):
         runtime = runtime_of(request)
-        return {"running": runtime.scheduler.running, "keywords": repo.progress(runtime.conn)}
+        return {
+            "running": runtime.scheduler.running,
+            "max_downloads": runtime.settings.target_count,   # .env 의 MAX_DOWNLOADS
+            "keywords": repo.progress(runtime.conn),
+        }
 
     @app.get("/api/health")
     async def health(request: Request):

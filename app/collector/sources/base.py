@@ -18,7 +18,7 @@ from ..http import Http, HttpError, RateLimiter
 @dataclass(frozen=True)
 class Page:
     items: list[Any]          # 검색 결과 아이템들 (사이트가 준 JSON 조각 그대로)
-    total: int | None         # 전체 검색 결과 수 (진행률 표시용)
+    total: int | None         # 이 키워드로 받을 수 있는 전체 수 (진행바 분모)
     next_cursor: str | None   # 다음에 요청할 위치. 더 없으면 None
 
 

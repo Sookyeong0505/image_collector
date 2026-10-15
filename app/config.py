@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MAX_DOWNLOADS = 2000
 
 
 def _positive_int(value: str | None, fallback: int | None) -> int | None:
@@ -23,7 +24,7 @@ def _positive_int(value: str | None, fallback: int | None) -> int | None:
 class Settings:
     base_save_path: Path            # 이미지 저장 폴더. 그 아래 {키워드}/{사이트}/ 로 나뉜다
     db_path: Path
-    target_count: int | None        # 키워드×사이트 작업 하나에서 받을 최대 장수 (None = 가능한 만큼)
+    target_count: int | None        # 키워드×사이트 작업 하나에서 받을 최대 장수 (.env 의 MAX_DOWNLOADS, 기본 2000)
     timeout: float                  # 요청 1건당 타임아웃(초)
     max_retries: int                # 네트워크 오류 재시도 횟수
     phash_threshold: int            # 지각 해시가 이 비트 수 이하로 다르면 같은 이미지로 본다
@@ -41,7 +42,7 @@ class Settings:
         return cls(
             base_save_path=Path(env.get("BASE_SAVE_PATH") or PROJECT_ROOT / "Image"),
             db_path=Path(env.get("DB_PATH") or PROJECT_ROOT / "data" / "pipeline.db"),
-            target_count=_positive_int(env.get("MAX_DOWNLOADS"), None),
+            target_count=_positive_int(env.get("MAX_DOWNLOADS"), DEFAULT_MAX_DOWNLOADS),
             timeout=_positive_int(env.get("REQUEST_TIMEOUT_MS"), 60_000) / 1000,
             max_retries=_positive_int(env.get("MAX_RETRIES"), 4),
             phash_threshold=_positive_int(env.get("PHASH_THRESHOLD"), 5),

@@ -23,7 +23,7 @@ Node로 만들었던 수집기를 Python으로 다시 만들면서 합의한 내
 | F2 | API 연결 확인 | 사이트별로 검색 1건을 요청해 키가 유효한지 확인 |
 | F3 | 키워드 여러 개 입력 (`,` 구분) | 입력 순서를 `sort_order`로 저장 |
 | F4 | 키워드 순서대로 수집 | **B안**: 사이트마다 자기 속도로 키워드 목록을 순서대로 진행 |
-| F5 | 사이트별 진행률 표시 | `collect_jobs`의 카운터와 상태를 조회 |
+| F5 | 사이트별 진행률 표시 | 분모는 사이트가 알려 준 키워드별 전체 수(`total_available`, 첫 검색 페이지에서 확인), 분자는 확인한 장수(저장+중복+건너뜀+실패) |
 | F6 | API 한도 도달 시 대기 후 재개 | 시간당 한도의 남은 시간만큼만 대기 |
 | F7 | 에러 시 잠시 멈췄다 재시도 | 네트워크 오류, 429, 5xx는 1→2→4→8초 간격으로 재시도 |
 | F8 | 심각한 에러 시 10분 후 재진행 | 해당 사이트×키워드 작업만 10분 쉬고 저장된 커서부터 재개 |
@@ -216,13 +216,13 @@ python -m venv .venv
 | 명령 | 하는 일 |
 |---|---|
 | `.venv\Scripts\python -m app check` | API 키 4개가 유효한지 확인 |
-| `.venv\Scripts\python -m app collect "beach, sunset" --sites pexels,naver --target 50` | 키워드를 등록하고 끝날 때까지 수집 |
+| `.venv\Scripts\python -m app collect "beach, sunset" --sites pexels,naver` | 키워드를 등록하고 끝날 때까지 수집 |
 | `.venv\Scripts\python -m app resume` | 남은 작업을 이어서 수집 |
 | `.venv\Scripts\python -m app status` | 진행 상황 출력 |
 | `.venv\Scripts\python -m app serve` | 웹 서버 실행. 화면은 http://127.0.0.1:8000, API 문서는 `/docs` |
 | `.venv\Scripts\python -m pytest` | 테스트 |
 
-`collect`의 `--sites`를 빼면 키가 설정된 모든 사이트에서, `--target`을 빼면 `.env`의 `MAX_DOWNLOADS`만큼 받습니다.
+`collect`의 `--sites`를 빼면 키가 설정된 모든 사이트에서 받습니다. 최대 장수는 `.env`의 `MAX_DOWNLOADS`(기본 2000)만 따릅니다.
 
 ## 9. 코드 구조
 

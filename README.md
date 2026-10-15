@@ -43,7 +43,7 @@ copy .env.sample .env
 | `PIXABAY_API_KEY` | Pixabay API 키 | — |
 | `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET` | 네이버 검색 API (NCP API Gateway) | — |
 | `BASE_SAVE_PATH` | 이미지 저장 폴더 | 프로젝트의 `Image` |
-| `MAX_DOWNLOADS` | 키워드×사이트 작업 하나에서 새로 받을 최대 장수 | 제한 없음 |
+| `MAX_DOWNLOADS` | 키워드×사이트 작업 하나에서 새로 저장할 최대 장수. 화면·명령줄에서는 바꿀 수 없음 | 2000 |
 | `REQUEST_TIMEOUT_MS` | 요청 1건당 타임아웃 | 60000 |
 | `MAX_RETRIES` | 네트워크 오류 재시도 횟수 | 4 |
 | `UNSPLASH_IMAGE_SIZE` | `full` / `raw` / `regular` / `small` | `regular` |
@@ -62,8 +62,10 @@ copy .env.sample .env
 브라우저에서 http://127.0.0.1:8000 을 엽니다.
 
 1. 수집할 사이트를 고릅니다. `연결 확인`을 누르면 API 키가 유효한지 알려 줍니다.
-2. 키워드를 쉼표로 구분해 입력하고, 필요하면 최대 장수를 적은 뒤 `실행`을 누릅니다.
+2. 키워드를 쉼표로 구분해 입력하고 `실행`을 누릅니다. 최대 장수는 `.env`의 `MAX_DOWNLOADS`를 따릅니다.
 3. 아래 표에서 키워드별·사이트별 진행 상황을 확인합니다. 3초마다 갱신됩니다.
+   진행바는 `확인한 장수 / 그 사이트에서 이 키워드로 받을 수 있는 전체 장수`입니다.
+   전체 장수는 사이트의 첫 검색 결과를 받을 때 확인되며, 그 전에는 `전체 수 확인 전`으로 보입니다.
 
 수집은 서버가 하므로 브라우저를 닫아도 계속됩니다. 서버를 다시 켜면 남아 있던 작업을 자동으로 이어서 합니다.
 오른쪽 위 `중단` / `재개` 버튼으로 수집을 잠시 멈출 수 있습니다.
@@ -73,13 +75,13 @@ copy .env.sample .env
 | 명령 | 하는 일 |
 |---|---|
 | `python -m app check` | API 키가 유효한지 확인 |
-| `python -m app collect "beach, sunset" --sites pexels,naver --target 50` | 키워드를 등록하고 끝날 때까지 수집 |
+| `python -m app collect "beach, sunset" --sites pexels,naver` | 키워드를 등록하고 끝날 때까지 수집 |
 | `python -m app resume` | 남은 작업을 이어서 수집 |
 | `python -m app status` | 진행 상황 출력 |
 | `python -m app serve --port 8000` | 웹 서버 실행 |
 
 명령 앞에 `.venv\Scripts\`를 붙여 실행합니다. `collect`에서 `--sites`를 빼면 키가 설정된 모든 사이트에서,
-`--target`을 빼면 `.env`의 `MAX_DOWNLOADS`만큼 받습니다. `Ctrl+C`로 멈춘 뒤 `resume`으로 이어서 할 수 있습니다.
+작업마다 `.env`의 `MAX_DOWNLOADS`만큼 받습니다. `Ctrl+C`로 멈춘 뒤 `resume`으로 이어서 할 수 있습니다.
 
 수집기(`serve`, `collect`, `resume`)는 한 번에 하나만 실행할 수 있습니다. 이미 돌고 있으면 두 번째 실행은 거부됩니다.
 `check`와 `status`는 수집기가 도는 중에도 실행할 수 있습니다.
@@ -175,8 +177,8 @@ DB 내용은 [DB Browser for SQLite](https://sqlitebrowser.org/) 같은 도구�
 |---|---|---|
 | GET | `/api/sites` | 사이트 목록, 키 설정 여부, 지금 더 쓸 수 있는 API 호출 수(`calls_left`) |
 | POST | `/api/sites/{name}/check` | API 연결 확인 |
-| POST | `/api/jobs` | 키워드·사이트 등록. 본문 예: `{"keywords": "beach, sunset", "sites": ["pexels"], "target_count": 50}` |
-| GET | `/api/progress` | 키워드별·사이트별 진행 상황 |
+| POST | `/api/jobs` | 키워드·사이트 등록. 본문 예: `{"keywords": "beach, sunset", "sites": ["pexels"]}` |
+| GET | `/api/progress` | 키워드별·사이트별 진행 상황, 최대 장수(`max_downloads`) |
 | POST | `/api/collector/stop` | 수집 일시 중단 |
 | POST | `/api/collector/start` | 수집 재개 |
 | GET | `/api/health` | 서버 상태 (스케줄러 동작 여부, 남은 작업 수, 절전 방지 여부, 마지막 저장 시각) |

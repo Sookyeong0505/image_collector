@@ -65,6 +65,26 @@ def test_등록하면_수집이_시작되고_진행률이_보인다(client, web,
     assert (settings.base_save_path / "beach" / "pexels" / "beach_1.jpg").exists()
 
 
+def test_최대_장수는_env_값만_쓰고_진행바_분모는_사이트가_알려준_전체_수다(settings, web):
+    fake_pexels(web, {1: [1, 2], 2: [3]})                   # 사이트가 알려 주는 전체 수 = 3
+    web.images({f"/p{i}": make_image(i) for i in (1, 2, 3)})
+    app = create_app(dataclasses.replace(settings, target_count=2), httpx.MockTransport(web))
+
+    with TestClient(app) as client:
+        # 화면에서 장수를 보내도 받지 않는다 (.env 의 MAX_DOWNLOADS 만 쓴다)
+        client.post("/api/jobs", json={"keywords": "beach", "sites": ["pexels"], "target_count": 99})
+
+        def finished():
+            data = client.get("/api/progress").json()
+            return data if data["keywords"][0]["status"] == "collected" else None
+        data = wait_until(finished)
+
+    job = data["keywords"][0]["jobs"][0]
+    assert data["max_downloads"] == 2
+    assert job["target_count"] == 2 and job["downloaded"] == 2
+    assert job["total_available"] == 3
+
+
 @pytest.mark.parametrize("body, reason", [
     ({"keywords": " , ", "sites": ["pexels"]}, "키워드"),
     ({"keywords": "beach", "sites": []}, "사이트"),

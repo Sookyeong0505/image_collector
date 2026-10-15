@@ -231,3 +231,11 @@ def test_네이버는_이미지_요청에_Referer를_붙인다(run, web):
 
     image_request = next(request for request in web.requests if request.url.host == "img.test")
     assert image_request.headers["referer"] == "https://search.naver.com/"
+
+
+def test_네이버_전체_수는_API로_닿을_수_있는_1099장까지만_센다(settings):
+    from app.collector.sources.naver import Naver
+    naver = Naver(settings)
+
+    assert naver.parse_page({"total": 5_000_000, "items": []}, "1").total == 1099
+    assert naver.parse_page({"total": 300, "items": []}, "1").total == 300

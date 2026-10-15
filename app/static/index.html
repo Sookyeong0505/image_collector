@@ -24,7 +24,6 @@
   input[type=text], input[type=number] { padding:8px 10px; border:1px solid var(--line); border-radius:8px;
          background:var(--bg); color:var(--text); font:inherit; }
   #keywords { flex:1 1 320px; }
-  #target { width:120px; }
   button { padding:8px 14px; border:1px solid var(--line); border-radius:8px; background:var(--card);
            color:var(--text); font:inherit; cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -39,6 +38,8 @@
   td.num { text-align:right; }
   tr.keyword td { font-weight:bold; background:var(--bg); }
   progress { width:120px; height:8px; vertical-align:middle; }
+  .ratio { margin-left:6px; font-size:13px; }
+  #limit { margin-top:8px; font-size:13px; }
   .error { white-space:normal; font-size:13px; }
 </style>
 </head>
@@ -57,9 +58,9 @@
     <div id="sites" class="row" style="margin-bottom:12px"></div>
     <div class="row">
       <input id="keywords" type="text" placeholder="키워드 (쉼표로 구분) 예: beach, sunset">
-      <input id="target" type="number" min="1" placeholder="최대 장수">
       <button id="submit" class="primary">실행</button>
     </div>
+    <div id="limit" class="muted"></div>
     <div id="message"></div>
   </section>
 
@@ -68,7 +69,7 @@
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>사이트</th><th>상태</th><th>진행</th><th class="num">저장</th><th class="num">중복</th>
+          <th>사이트</th><th>상태</th><th title="확인한 장수 / 사이트에서 받을 수 있는 전체 장수">진행</th><th class="num">저장</th><th class="num">중복</th>
           <th class="num">건너뜀</th><th class="num">실패</th><th>비고</th>
         </tr></thead>
         <tbody id="progress"></tbody>
@@ -119,11 +120,10 @@ async function loadSites() {
 
 async function submit() {
   const sites = [...document.querySelectorAll("#sites input:checked")].map((box) => box.value);
-  const target = parseInt($("target").value, 10);
   try {
     const answer = await api("/api/jobs", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keywords: $("keywords").value, sites, target_count: target > 0 ? target : null }),
+      body: JSON.stringify({ keywords: $("keywords").value, sites }),
     });
     say(`등록: ${answer.keywords.join(", ")} → ${answer.sites.join(", ")}`, "ok");
     $("keywords").value = "";
@@ -133,15 +133,21 @@ async function submit() {
 
 function jobRow(job) {
   const [label, cls] = STATUS[job.status] || [job.status, ""];
-  const goal = job.target_count || job.total_available;
-  const bar = goal ? el("progress", { max: goal, value: Math.min(job.downloaded + job.duplicates, goal) }) : "";
+  // 진행바 분모는 사이트가 알려 준 '이 키워드로 받을 수 있는 전체 수'. 첫 검색 페이지를 받아야 알 수 있다.
+  // 분자는 확인을 마친 장수(저장 + 중복 + 건너뜀 + 실패).
+  const total = job.total_available;
+  const checked = job.downloaded + job.duplicates + job.skipped + job.errors;
+  const progress = total == null
+    ? el("span", { className: "muted", textContent: "전체 수 확인 전" })
+    : [el("progress", { max: Math.max(total, 1), value: Math.min(checked, total) }),
+       el("span", { className: "ratio", textContent: `${checked.toLocaleString()} / ${total.toLocaleString()}` })];
   let note = "";
   if (job.resume_at && (job.status === "paused" || job.status === "rate_limited")) note = `${localTime(job.resume_at)} 재개`;
   if (job.last_error && (job.status === "paused" || job.status === "failed")) note += ` · ${job.last_error}`;
   const num = (value) => el("td", { className: "num", textContent: value });
   return el("tr", {},
     el("td", { textContent: job.site }), el("td", { className: cls, textContent: label }),
-    el("td", {}, bar, goal ? ` / ${goal}` : ""), num(job.downloaded), num(job.duplicates), num(job.skipped), num(job.errors),
+    el("td", {}, ...[progress].flat()), num(job.downloaded), num(job.duplicates), num(job.skipped), num(job.errors),
     el("td", { className: "error muted", textContent: note }));
 }
 
@@ -149,6 +155,8 @@ async function refresh() {
   try {
     const data = await api("/api/progress");
     $("running").textContent = data.running ? "수집기 동작 중" : "수집기 멈춤";
+    $("limit").textContent = data.max_downloads
+      ? `키워드×사이트마다 최대 ${data.max_downloads.toLocaleString()}장까지 저장합니다 (.env 의 MAX_DOWNLOADS)` : "";
     $("toggle").textContent = data.running ? "중단" : "재개";
     $("toggle").onclick = async () => {
       await api(`/api/collector/${data.running ? "stop" : "start"}`, { method: "POST" });

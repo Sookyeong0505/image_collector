@@ -1,7 +1,7 @@
 """명령줄 실행기.
 
     python -m app check                               API 키가 유효한지 확인
-    python -m app collect "beach, sunset" --sites pexels,naver --target 50
+    python -m app collect "beach, sunset" --sites pexels,naver
                                                       키워드를 등록하고 끝날 때까지 수집
     python -m app resume                              남은 작업을 이어서 수집
     python -m app status                              진행 상황 출력
@@ -27,7 +27,6 @@ def main() -> None:
     collect = commands.add_parser("collect", help="키워드를 등록하고 수집한다")
     collect.add_argument("keywords", help='쉼표로 구분한 키워드. 예: "beach, sunset"')
     collect.add_argument("--sites", help="쉼표로 구분한 사이트 (기본: 키가 설정된 모든 사이트)")
-    collect.add_argument("--target", type=int, help="키워드×사이트당 최대 장수 (기본: .env 의 MAX_DOWNLOADS)")
 
     check = commands.add_parser("check", help="API 연결을 확인한다")
     check.add_argument("--sites", help="쉼표로 구분한 사이트 (기본: 전체)")
@@ -97,7 +96,7 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"키워드와 사용 가능한 사이트가 필요합니다. 사용 가능: {', '.join(runtime.scheduler.sources) or '없음'}"
                       + (f" / 쓸 수 없는 사이트: {', '.join(unusable)}" if unusable else ""))
                 return 1
-            repo.add_keywords(runtime.conn, keywords, sites, args.target or settings.target_count)
+            repo.add_keywords(runtime.conn, keywords, sites, settings.target_count)
 
         # collect, resume 공통: 할 일이 없어질 때까지 돌린다
         await runtime.scheduler.run_until_idle()
@@ -116,8 +115,9 @@ def _print_progress(conn) -> None:
     for keyword in rows:
         print(f"\n{keyword['keyword']}  [{keyword['status']}]")
         for job in keyword["jobs"]:
-            target = job["target_count"] or job["total_available"] or "?"
-            line = (f"  {job['site']:9} {job['status']:12} 저장 {job['downloaded']}/{target}"
+            done = job["downloaded"] + job["duplicates"] + job["skipped"] + job["errors"]
+            total = job["total_available"] if job["total_available"] is not None else "?"
+            line = (f"  {job['site']:9} {job['status']:12} 확인 {done}/{total}  저장 {job['downloaded']}"
                     f"  중복 {job['duplicates']}  건너뜀 {job['skipped']}  실패 {job['errors']}")
             if job["resume_at"]:
                 line += f"  재개(UTC) {job['resume_at']}"
