@@ -10,7 +10,7 @@ from app.collector.engine import Deps, run_job
 from app.collector.http import AuthFailure, RateLimiter, NetworkError
 from app.collector.sources import build_sources
 from app.db import repo
-from tests.conftest import fake_naver, fake_pexels, fake_pixabay, fake_unsplash, make_image
+from tests.conftest import fake_naver, fake_pexels, fake_pixabay, fake_unsplash, make_image, page_of
 
 
 @pytest.fixture
@@ -239,3 +239,39 @@ def test_네이버_전체_수는_API로_닿을_수_있는_1099장까지만_센�
 
     assert naver.parse_page({"total": 5_000_000, "items": []}, "1").total == 1099
     assert naver.parse_page({"total": 300, "items": []}, "1").total == 300
+
+
+def test_빈_페이지의_전체_수_0으로_덮어쓰지_않고_끝까지_보면_확인한_수가_전체_수다(run, web):
+    def pexels(request):                                    # Pexels 는 결과가 끝난 페이지에서 total_results 를 0 으로 준다
+        if page_of(request) == 1:
+            photos = [{"id": i, "src": {"large2x": f"https://img.test/p{i}"}} for i in (1, 2)]
+            return httpx.Response(200, json={"total_results": 8000, "photos": photos, "next_page": "y"})
+        return httpx.Response(200, json={"total_results": 0, "photos": []})
+    web.route("api.pexels.com", pexels)
+    web.images({"/p1": make_image(1), "/p2": make_image(2)})
+
+    job = run("pexels")
+
+    assert job["total_available"] == 2                      # 8000 도 0 도 아닌, 실제로 받을 수 있던 수
+
+
+def test_사이트가_알려준_수보다_많이_나오면_확인한_수를_전체_수로_쓴다(run, web, conn):
+    fake_pixabay(web, {1: [1, 2, 3]}, total_hits=2)         # Pixabay 는 totalHits 보다 많이 돌려주기도 한다
+    web.images({f"/x{i}": make_image(i) for i in (1, 2, 3)})
+
+    job = run("pixabay")
+
+    assert job["total_available"] == 3
+
+    # 수집 도중에도 사이트 숫자가 확인한 수보다 작으면 확인한 수를 쓴다
+    repo.set_total_available(conn, job["id"], 1)
+    assert repo.get_job(conn, job["id"])["total_available"] == 3
+
+
+def test_목표_장수에서_멈추면_사이트가_알려준_전체_수를_그대로_둔다(run, web):
+    fake_pexels(web, {1: [1, 2, 3]})
+    web.images({f"/p{i}": make_image(i) for i in (1, 2, 3)})
+
+    job = run("pexels", target=1)
+
+    assert job["total_available"] == 3

@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from app.db import connect, init_db
+from app.db.connection import SCHEMA_VERSION
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -160,5 +161,24 @@ def test_보류_컬럼이_없는_옛_DB를_열면_컬럼을_붙인다(tmp_path):
 
     row = conn.execute("SELECT text, held FROM keywords").fetchone()
     assert (row["text"], row["held"]) == ("beach", 0)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     conn.close()
+
+
+def test_예전_방식으로_적힌_전체_수를_바로잡는다(conn):
+    from app.db import repo
+    repo.add_keywords(conn, ["beach"], ["pexels", "pixabay", "naver", "unsplash"], 2000)
+    rows = {   # 사이트: (상태, 저장, 중복, 전체 수)
+        "pexels": ("done", 471, 3, 0),             # 빈 페이지가 0 으로 덮어씀 → 끝까지 봤으니 474
+        "pixabay": ("running", 581, 19, 500),      # 알려 준 수보다 많이 나옴 → 600
+        "naver": ("pending", 0, 0, 968935),        # 1099장 제한 전의 값 → 1099
+        "unsplash": ("done", 2000, 0, 6026),       # 목표 장수에 닿아 끝남 → 그대로
+    }
+    for site, (status, downloaded, duplicates, total) in rows.items():
+        conn.execute("UPDATE collect_jobs SET status = ?, downloaded = ?, duplicates = ?, total_available = ? WHERE site = ?",
+                     (status, downloaded, duplicates, total, site))
+
+    repo.repair_totals(conn)
+
+    totals = {row["site"]: row["total_available"] for row in conn.execute("SELECT site, total_available FROM collect_jobs")}
+    assert totals == {"pexels": 474, "pixabay": 600, "naver": 1099, "unsplash": 6026}

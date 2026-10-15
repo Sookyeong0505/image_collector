@@ -218,9 +218,49 @@ def save_cursor(conn: sqlite3.Connection, job_id: int, cursor: str | None) -> No
     conn.commit()
 
 
+# 확인한 장수 = 진행바의 분자
+_CHECKED = "(downloaded + duplicates + skipped + errors)"
+
+
 def set_total_available(conn: sqlite3.Connection, job_id: int, total: int) -> None:
-    conn.execute("UPDATE collect_jobs SET total_available = ? WHERE id = ?", (total, job_id))
+    """사이트가 알려 준 전체 수를 적는다. 이미 확인한 수보다 작으면 확인한 수를 쓴다.
+
+    Pixabay 는 totalHits(500)보다 많이(600장) 돌려주기도 한다. 사이트 숫자를 그대로 쓰면 진행바가 넘친다.
+    """
+    conn.execute(f"UPDATE collect_jobs SET total_available = MAX(?, {_CHECKED}) WHERE id = ?", (total, job_id))
     conn.commit()
+
+
+def settle_total(conn: sqlite3.Connection, job_id: int) -> None:
+    """검색 결과를 끝까지 봤을 때 부른다. 실제로 확인한 수가 이 키워드로 받을 수 있는 전체 수다.
+
+    사이트가 알려 주는 수는 실제와 다르다. Pexels 는 수천 장이라고 하고 480장쯤에서 끝나고,
+    네이버도 1099장보다 일찍 끝나는 일이 많다.
+    """
+    conn.execute(f"UPDATE collect_jobs SET total_available = {_CHECKED} WHERE id = ?", (job_id,))
+    conn.commit()
+
+
+def repair_totals(conn: sqlite3.Connection) -> int:
+    """위 규칙이 생기기 전에 쌓인 전체 수를 고친다. 고친 작업 수를 돌려준다.
+
+      - 결과를 끝까지 보고 끝난 작업(done 인데 목표 장수에 못 미침) → 확인한 수
+      - 확인한 수가 전체 수보다 큰 작업 → 확인한 수
+      - 네이버 전체 수가 API 로 닿을 수 있는 1099장을 넘는 작업 → 1099
+    """
+    changed = conn.execute(
+        f"""
+        UPDATE collect_jobs SET total_available = {_CHECKED}
+        WHERE total_available IS NOT NULL AND total_available != {_CHECKED}
+          AND ((status = 'done' AND (target_count IS NULL OR downloaded < target_count))
+               OR {_CHECKED} > total_available)
+        """
+    ).rowcount
+    changed += conn.execute(
+        "UPDATE collect_jobs SET total_available = 1099 WHERE site = 'naver' AND total_available > 1099"
+    ).rowcount
+    conn.commit()
+    return changed
 
 
 def bump(conn: sqlite3.Connection, job_id: int, counter: str) -> None:

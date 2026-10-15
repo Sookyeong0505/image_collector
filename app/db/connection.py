@@ -8,12 +8,14 @@ import os
 import sqlite3
 from pathlib import Path
 
+from .repo import repair_totals
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 # 스키마를 바꿀 때마다 1씩 올린다. DB 파일 안의 PRAGMA user_version 과 비교해
 # "옛 스키마로 만든 DB"를 알아챌 수 있다.
-SCHEMA_VERSION = 2   # 2: keywords.held (보류) 추가
+SCHEMA_VERSION = 3   # 2: keywords.held (보류) 추가 / 3: 진행바 전체 수 바로잡기 (데이터만)
 
 
 def default_db_path() -> Path:
@@ -60,13 +62,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
 
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    _migrate(conn)
+    _migrate(conn, found)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """옛 버전으로 만든 DB 에 새 컬럼을 붙인다.
+def _migrate(conn: sqlite3.Connection, found: int) -> None:
+    """옛 버전으로 만든 DB 를 지금 버전에 맞춘다 (새 컬럼 추가, 한 번만 필요한 데이터 보정).
 
     CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블을 건드리지 않으므로, 컬럼 추가는 여기서 따로 한다.
     컬럼이 있는지 보고 붙이므로 여러 번 호출해도 안전하다.
@@ -74,3 +76,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(keywords)")}
     if "held" not in columns:   # 버전 1 → 2
         conn.execute("ALTER TABLE keywords ADD COLUMN held INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1))")
+
+    if 0 < found < 3:           # 버전 2 → 3: 예전 방식으로 적힌 전체 수를 한 번 바로잡는다
+        repair_totals(conn)

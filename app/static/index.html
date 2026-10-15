@@ -296,6 +296,8 @@ function jobRow(job) {
   const checked = job.downloaded + job.duplicates + job.skipped + job.errors;
   const progress = total == null
     ? el("span", { className: "muted", textContent: "전체 수 확인 전" })
+    : total === 0 && checked === 0
+    ? el("span", { className: "muted", textContent: "검색 결과 없음" })
     : [el("progress", { max: Math.max(total, 1), value: Math.min(checked, total) }),
        el("span", { className: "ratio", textContent: `${checked.toLocaleString()} / ${total.toLocaleString()}` })];
   let note = "";

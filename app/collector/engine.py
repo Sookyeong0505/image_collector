@@ -82,10 +82,11 @@ async def run_job(job_id: int, source: Source, limiter: RateLimiter, deps: Deps)
             raise
 
         page = source.parse_page(data, cursor)
-        if page.total is not None:
-            repo.set_total_available(conn, job_id, page.total)
         if not page.items:
             break
+        # 결과가 끝난 뒤의 빈 페이지는 전체 수를 0 으로 알려 주기도 해서(Pexels), 결과가 있는 페이지만 믿는다
+        if page.total is not None:
+            repo.set_total_available(conn, job_id, page.total)
 
         # ── 그 페이지의 아이템들 ─────────────────────────────────
         for item in page.items:
@@ -115,6 +116,7 @@ async def run_job(job_id: int, source: Source, limiter: RateLimiter, deps: Deps)
         if cursor is not None and source.page_delay:
             await deps.sleep(source.page_delay)
 
+    repo.settle_total(conn, job_id)
     log.info("[%s] '%s' 검색 결과를 끝까지 확인", source.name, keyword)
 
 
