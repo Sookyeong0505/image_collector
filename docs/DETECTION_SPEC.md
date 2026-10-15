@@ -68,7 +68,7 @@ reference에서 4조건은 "검수 폴더에 저장할 후보"를 고르는 기�
 | 항목 | reference | original 브랜치 | 결과에 주는 영향 |
 |---|---|---|---|
 | YOLO 실행 | 브라우저, onnxruntime-web (WASM) | 워커, onnxruntime (CPU) | 같은 모델이라 실수 오차 수준 |
-| 640 리사이즈 | Canvas `drawImage` | Pillow `resize(box=…)`, BILINEAR | **보간 방식이 달라 점수가 조금 다를 수 있음** (5-1) |
+| 640 리사이즈 | Canvas `drawImage` | Chrome 방식을 흉내 낸 밉맵 + bilinear (`yolo.resize_like_canvas`) | YOLO 점수 차이 평균 0.009 (9-2) |
 | 피부색 분석 | Canvas 픽셀 | NumPy 배열 | 같은 식이라 동일 |
 | 브라우저 ↔ 서버 | multipart POST `/api/collect` | 같은 프로세스 안의 함수 호출 | 없음 |
 | 입력 | 사용자가 고른 폴더 | DB의 `images` (`detected_at`이 빈 것) | 없음 |
@@ -299,10 +299,16 @@ IoU·NMS, YOLO 출력 해석(가짜 텐서), 구역 선택과 동점 규칙, 피
 
 이 브랜치의 핵심 검증입니다. 같은 이미지 묶음을 reference와 이식 버전에 각각 넣고 결과를 비교합니다.
 
-1. 샘플 묶음을 정합니다. 양성·음성이 섞이도록 수집 이미지와 `reference/server/dataset/used_img`에서 고릅니다.
-2. reference를 실행해 결과를 받습니다. reference는 저장 조건을 넘은 검출만 `metadata.jsonl`에 남깁니다. 그래서 비교하는 동안에만 **모든 검출을 기록하도록 임시로 고칩니다.** 이 수정은 커밋하지 않습니다. 화면에서 폴더를 고르는 단계는 사용자가 직접 합니다.
-3. 이식 버전으로 같은 묶음을 처리합니다.
-4. 이미지별로 비교합니다: 이미지 판정, 채택 구역, 검출 개수, 박스 좌표, YOLO 점수, head 점수 3개.
+1. 샘플 묶음을 정합니다. `used_img`에서 50장, 수집 이미지(`F:\Images`)에서 100장을 시드 `20261015`로 뽑아 `data/compare/sample/`에 둡니다.
+2. reference를 실행해 결과를 받습니다. `reference/`는 그대로 두고 **비교용 사본** `data/compare/reference_app/`을 만들어 고칩니다. 고친 곳은 `[COMPARE]` 표시가 있는 부분뿐이고 판정 로직은 건드리지 않습니다.
+   - 서버(5001번 포트. 5000번은 다른 프로그램이 쓰고 있음): 샘플 파일을 내려주고, 브라우저가 보낸 이미지별 결과를 `data/compare/reference.jsonl`에 기록
+   - 화면: `http://localhost:5173/#compare`로 열면 샘플을 받아 자동으로 처리. 폴더 선택이 필요 없습니다.
+   - 이미지 사이의 `requestAnimationFrame` 대기를 `setTimeout`으로 바꿈. 브라우저 창이 가려지면 멈추기 때문입니다. 결과에는 영향이 없습니다.
+   - 같은 가상환경(`.venv`)에서 돌려 torch·transformers 버전 차이를 없앴습니다. 그래서 이 비교는 **이식 코드의 차이만** 봅니다.
+   - 실행 설정은 `.claude/launch.json`의 `compare-ref-server`, `compare-ref-web`입니다.
+3. 이식 버전으로 같은 묶음을 처리합니다: `python -m app detect-one data/compare/sample --json > data/compare/ported.jsonl`
+4. 이미지별로 비교합니다: `python scripts/compare_reference.py data/compare/reference.jsonl data/compare/ported.jsonl`
+   이미지 판정, 채택 구역, 검출 개수, 박스 좌표, YOLO 점수, head 점수 3개를 봅니다.
 
 | 비교 항목 | 목표 |
 |---|---|
@@ -310,8 +316,38 @@ IoU·NMS, YOLO 출력 해석(가짜 텐서), 구역 선택과 동점 규칙, 피
 | 같은 검출의 YOLO 점수 차이 | 평균 0.02 이하 |
 | 같은 검출의 head 점수 차이 | 평균 0.02 이하 |
 
-목표 수치는 임시값입니다. 리사이즈 보간 차이가 실제로 얼마나 나는지 모르기 때문입니다. 첫 비교 결과를 보고 확정합니다.
-차이가 크게 나면 Pillow 보간 방식을 바꿔 가며 Canvas와 가장 가까운 것을 고릅니다.
+#### 비교 결과 (2026-10-15, 샘플 150장: reference 양성 58장, 음성 92장)
+
+| 비교 항목 | 목표 | 1차 (Pillow BILINEAR) | 2차 (밉맵 + bilinear) |
+|---|---|---|---|
+| 이미지 판정 일치율 | 98% 이상 | 95.3% (143/150) | **98.7% (148/150)** |
+| 채택 구역 일치 | — | 147/150 | 149/150 |
+| 검출 개수 일치 | — | 142/150 | 148/150 |
+| 박스 IoU 평균 | — | 0.979 | 0.992 |
+| YOLO 점수 차이 평균 (최대) | 0.02 이하 | 0.025 (0.237) | **0.009 (0.050)** |
+| SwinV2 점수 차이 평균 | 0.02 이하 | 0.013 | **0.008** |
+| DINOv2 x1.5 · x2 점수 차이 평균 | 0.02 이하 | 0.012 · 0.012 | **0.008 · 0.009** |
+
+2차에서 목표를 모두 넘었습니다. 남은 불일치 2장은 모두 기준값 바로 옆에서 갈린 경우입니다.
+
+- `bikinis_IMStenMyG4M.jpg`: YOLO 0.5995(reference) ↔ 0.6025(이식). 0.6 기준을 사이에 두고 판정이 갈림
+- `bodybuilder_woman_14983372…jpg`: reference YOLO 0.3021 → 이식은 0.3 미만이라 박스 자체가 없음
+
+**1차에서 2차로 바꾼 것.** 1차의 불일치 7장도 모두 YOLO 점수가 0.6 근처인 경우였습니다. 원인을 찾으려고 브라우저 Canvas가 실제로 만든 640×640 픽셀(6장 × 3구역)을 받아 여러 리사이즈 방식과 비교했습니다.
+
+| 리사이즈 방식 | 픽셀 평균 오차 | YOLO 최고점 차이 평균 |
+|---|---|---|
+| 이미지 전체 밉맵, 단계 = 덜 줄어드는 쪽 배율, 이후 bilinear | **1.14** | **0.007** |
+| Pillow BICUBIC | 1.40 | 0.021 |
+| bilinear (안티앨리어싱 없음) | 1.47 | 0.049 |
+| Pillow BILINEAR (1차) | 1.56 | 0.043 |
+| Pillow BOX | 1.66 | 0.022 |
+| Pillow NEAREST | 2.52 | 0.103 |
+
+Chrome은 이미지를 크게 줄일 때 절반씩 줄인 사본(밉맵)을 미리 만들어 두고, 알맞은 단계에서 bilinear로 읽습니다. 이 동작을 흉내 낸 방식이 가장 가까워서 이것으로 바꿨습니다.
+남은 픽셀 오차(약 1)는 브라우저와 Pillow의 JPEG 디코더 차이로 보입니다. 이 부분은 더 맞추기 어렵습니다.
+
+같은 가상환경에서 두 쪽을 돌렸기 때문에, head 점수의 작은 차이(평균 0.008)는 Crop 좌표가 1~2픽셀 달라서 생긴 것입니다.
 
 ## 10. 개발 순서
 
@@ -323,7 +359,7 @@ IoU·NMS, YOLO 출력 해석(가짜 텐서), 구역 선택과 동점 규칙, 피
 | 1 | 완료 | `yolo.py`: 3구역 전처리, ONNX 추론, 출력 해석, NMS, 구역 선택 | 단위 테스트 + 샘플 이미지 박스 출력 |
 | 2 | 완료 | `skin.py`, `crops.py`: 피부색 필터, 좌표 변환, 3배율 Crop | 단위 테스트 |
 | 3 | 완료 | `verifiers.py`: head 로드, 백본 lazy 로딩, 점수 계산 | head 로드 테스트. 측정: VRAM 약 2GB, 프로세스 RAM 약 1.25GB, 검출 1건당 약 130ms (RTX 2060) |
-| 4 | 구현 완료, 비교 남음 | `pipeline.py` 조립, 이미지 1장 디버그 명령 `python -m app detect-one <파일>` | 파이프라인 단위 테스트, 샘플 10장 실행. 9-2 동등성 비교는 남음 |
+| 4 | 완료 | `pipeline.py` 조립, 이미지 1장 디버그 명령 `python -m app detect-one <파일>`, 리사이즈를 Canvas 방식으로 맞춤 | 9-2 동등성 비교: 판정 일치 98.7%, YOLO 점수 차이 평균 0.009 |
 | 5 | 대기 | 스키마 v4, repo 함수, `worker.py`(작업 루프·재시작 복구·에러 정책), 잠금 | DB·워커 단위 테스트 (가짜 파이프라인) |
 | 6 | 대기 | 날짜 폴더(`YYYYMMDD_dataset`)에 결과 파일·metadata 저장, `python -m app detect` 명령 | 날짜 계산 단위 테스트(자정 경계 포함) + 실제 키워드 1개 처리 후 DB·폴더 확인 |
 | 7 | 대기 | 진행 화면과 `/api/progress`에 검출 진행률·양성 수 추가 | 브라우저에서 수집 → 검출 진행 확인 |
@@ -345,5 +381,4 @@ reference를 그대로 재현하기 때문에 아래 문제도 그대로 남습�
 ## 12. 아직 정하지 않은 것
 
 - 9-2 동등성 비교의 목표 수치와 샘플 묶음 크기
-- 이미지 전처리기 종류: transformers 5.19에서 SwinV2는 `ViTImageProcessor`, DINOv2는 `BitImageProcessor`(둘 다 느린 버전)로 잡혔습니다. reference 환경의 transformers 버전을 몰라서 같은 전처리기였는지 확실하지 않습니다. 9-2 비교에서 head 점수 차이가 크면 먼저 의심할 부분입니다.
-- 샘플 10장에서 SwinV2 점수가 모두 0.02 미만이었습니다. 원래 그런 모델인지, 환경 차이 때문인지 9-2 비교로 확인해야 합니다.
+- 원래 reference가 돌던 환경(Python 3.11, torch 2.13, transformers 버전 모름)과의 차이. 9-2 비교는 양쪽을 같은 가상환경에서 돌려 **이식 코드의 차이만** 확인했습니다. 원래 환경에서 head 점수가 같았는지는 확실하지 않습니다. 확인하려면 원래 환경의 transformers 버전이 필요합니다. 현재 전처리기는 SwinV2가 `ViTImageProcessor`, DINOv2가 `BitImageProcessor`입니다.

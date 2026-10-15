@@ -12,6 +12,25 @@
         "8000"
       ],
       "port": 8000
+    },
+    {
+      "name": "compare-ref-server",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "data/compare/reference_app/server/app.py"
+      ],
+      "port": 5001
+    },
+    {
+      "name": "compare-ref-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "data/compare/reference_app",
+        "run",
+        "dev"
+      ],
+      "port": 5173
     }
   ]
 }

@@ -7,6 +7,7 @@ reference/src/App.tsx 의 preprocessSection, runDetection, calculateIoU, applyNm
           → 구역별 최고 점수를 비교해 한 구역만 채택
 """
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,14 +73,50 @@ def sections_of(width: int, height: int) -> list[Section]:
     ]
 
 
-def preprocess(image: Image.Image, section: Section) -> np.ndarray:
-    """R3. 구역을 비율을 무시하고 640×640 으로 늘린 뒤 /255 → [1, 3, 640, 640] float32 (RGB).
+def mip_level(section: Section) -> int:
+    """구역을 640 으로 줄일 때 쓸 밉맵 단계. 가로·세로 중 덜 줄어드는 쪽 배율로 정한다.
 
-    브라우저는 Canvas drawImage 로 늘렸다. 보간 방식이 달라 점수가 미세하게 다를 수 있다 (명세 9-2 에서 비교).
+    예: 6720×4480 → 640×640 이면 배율은 10.5, 7 → 작은 쪽 7 → 2단계(1/4 크기)부터 샘플링한다.
     """
-    box = (section.x, section.y, section.x + section.width, section.y + section.height)
-    resized = image.resize((INPUT_SIZE, INPUT_SIZE), Image.Resampling.BILINEAR, box=box)
-    pixels = np.asarray(resized, dtype=np.float32) / 255
+    scale = min(section.width, section.height) / INPUT_SIZE
+    return max(0, math.floor(math.log2(scale))) if scale >= 1 else 0
+
+
+def _bilinear(pixels: np.ndarray, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """픽셀 중심 기준 좌표(xs, ys)에서 bilinear 로 값을 읽는다. 이미지 밖은 가장자리 값."""
+    height, width = pixels.shape[:2]
+    u = np.clip(xs - 0.5, 0, width - 1)
+    v = np.clip(ys - 0.5, 0, height - 1)
+    x0, y0 = np.floor(u).astype(np.intp), np.floor(v).astype(np.intp)
+    x1, y1 = np.minimum(x0 + 1, width - 1), np.minimum(y0 + 1, height - 1)
+    wx, wy = (u - x0)[np.newaxis, :, np.newaxis], (v - y0)[:, np.newaxis, np.newaxis]
+    source = pixels.astype(np.float32)
+    top = source[y0][:, x0] * (1 - wx) + source[y0][:, x1] * wx
+    bottom = source[y1][:, x0] * (1 - wx) + source[y1][:, x1] * wx
+    return np.clip(np.round(top * (1 - wy) + bottom * wy), 0, 255).astype(np.uint8)
+
+
+def resize_like_canvas(image: Image.Image, section: Section) -> np.ndarray:
+    """구역을 640×640 으로 늘린 RGB uint8 배열. 브라우저(Chrome) Canvas drawImage 와 가깝게 만든다.
+
+    Chrome 은 크게 줄일 때 이미지 전체를 절반씩 줄인 사본(밉맵)을 만들고, 알맞은 단계에서 bilinear 로 읽는다.
+    Pillow 의 BILINEAR(안티앨리어싱)로 줄이면 YOLO 점수가 평균 0.04 달라졌고, 이 방식은 0.007 이었다 (명세 9-2).
+    """
+    mip = image
+    for _ in range(mip_level(section)):
+        if mip.width < 2 or mip.height < 2:
+            break
+        mip = mip.reduce(2)   # 2×2 평균
+    fx, fy = image.width / mip.width, image.height / mip.height
+    steps = (np.arange(INPUT_SIZE) + 0.5) / INPUT_SIZE
+    xs = (section.x + steps * section.width) / fx
+    ys = (section.y + steps * section.height) / fy
+    return _bilinear(np.asarray(mip), xs, ys)
+
+
+def preprocess(image: Image.Image, section: Section) -> np.ndarray:
+    """R3. 구역을 비율을 무시하고 640×640 으로 늘린 뒤 /255 → [1, 3, 640, 640] float32 (RGB)."""
+    pixels = resize_like_canvas(image, section).astype(np.float32) / 255
     return pixels.transpose(2, 0, 1)[np.newaxis]   # HWC → NCHW
 
 

@@ -8,7 +8,7 @@ from PIL import Image
 from app.config import PROJECT_ROOT
 from app.detector.yolo import (
     INPUT_SIZE, Box, Section, SectionResult, YoloDetector, apply_nms, iou, parse_output, pick_best,
-    preprocess, sections_of,
+    mip_level, preprocess, resize_like_canvas, sections_of,
 )
 
 FULL = Section("full", 0, 0, 1280, 640)   # 640 입력 기준 가로 2배, 세로 1배
@@ -101,6 +101,22 @@ def test_전처리는_비율_무시하고_640으로_늘린_RGB_NCHW():
     tensor = preprocess(image, Section("left", 0, 0, 150, 100))
     assert tensor.shape == (1, 3, INPUT_SIZE, INPUT_SIZE) and tensor.dtype == np.float32
     assert tensor[0, 0].min() == pytest.approx(1) and tensor[0, 1].max() == 0   # 빨강 채널만 1
+
+
+def test_밉맵_단계는_덜_줄어드는_쪽_배율로_정한다():
+    assert mip_level(Section("full", 0, 0, 6720, 4480)) == 2     # 배율 10.5, 7 → 7 → 2단계
+    assert mip_level(Section("left", 0, 0, 3360, 4480)) == 2     # 5.25 → 2단계
+    assert mip_level(Section("full", 0, 0, 1279, 3000)) == 0     # 1.998 → 0단계
+    assert mip_level(Section("full", 0, 0, 300, 200)) == 0       # 확대는 밉맵을 쓰지 않는다
+
+
+def test_Canvas식_리사이즈는_밉맵_단계에서_픽셀_중심을_읽는다():
+    image = Image.new("RGB", (2560, 1280))
+    image.paste((255, 255, 255), (0, 0, 1280, 1280))             # 왼쪽 절반 흰색
+    pixels = resize_like_canvas(image, Section("full", 0, 0, 2560, 1280))
+    assert pixels.shape == (640, 640, 3) and pixels.dtype == np.uint8
+    assert pixels[0, 0].tolist() == [255, 255, 255] and pixels[0, -1].tolist() == [0, 0, 0]
+    assert pixels[0, 319].tolist() == [255] * 3 and pixels[0, 320].tolist() == [0] * 3   # 경계가 정확히 가운데
 
 
 class FakeSession:
