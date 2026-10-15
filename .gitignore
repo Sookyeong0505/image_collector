@@ -139,3 +139,7 @@ logs/
 Image/
 datasets/
 *.egg-info/
+
+# 검출 모델 파일과 검출 결과 (용량이 커서 저장소에 넣지 않는다)
+models/
+detect/

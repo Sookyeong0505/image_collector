@@ -6,6 +6,7 @@
     python -m app resume                              남은 작업을 이어서 수집
     python -m app status                              진행 상황 출력
     python -m app serve                               웹 서버 실행 (http://127.0.0.1:8000)
+    python -m app detect-one <파일 또는 폴더> [--json] 이미지를 검출해 결과만 출력 (검출 의존성 필요)
 """
 
 import argparse
@@ -37,6 +38,10 @@ def main() -> None:
     serve = commands.add_parser("serve", help="웹 서버를 실행한다")
     serve.add_argument("--port", type=int, default=8000)
 
+    detect_one = commands.add_parser("detect-one", help="이미지 파일(또는 폴더)을 검출해 결과만 출력한다 (DB·파일 저장 없음)")
+    detect_one.add_argument("paths", nargs="+", help="이미지 파일 또는 폴더")
+    detect_one.add_argument("--json", action="store_true", help="이미지 1장 = JSON 한 줄로 출력 (reference 와 비교용)")
+
     args = parser.parse_args()
 
     # pythonw 로 실행하면 표준 출력이 아예 없다(None). 출력하려는 코드가 죽지 않게 버리는 곳으로 연결한다.
@@ -51,6 +56,9 @@ def main() -> None:
         # 내 PC 에서만 접속할 수 있게 127.0.0.1 로 연다. 로그는 app.main 이 설정한다.
         uvicorn.run("app.main:app", host="127.0.0.1", port=args.port, log_level="warning")
         return
+
+    if args.command == "detect-one":
+        sys.exit(_detect_one(args.paths, as_json=args.json))
 
     setup_logging()
     try:
@@ -102,6 +110,65 @@ async def _run(args: argparse.Namespace) -> int:
         await runtime.scheduler.run_until_idle()
         _print_progress(runtime.conn)
         return 0
+
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+
+
+def _detect_one(paths: list[str], as_json: bool) -> int:
+    """검출 의존성(torch 등)이 무거워서 이 명령을 쓸 때만 불러온다."""
+    import json
+    import logging
+    from pathlib import Path
+
+    from .detector.pipeline import Pipeline
+
+    logging.basicConfig(level=logging.INFO if not as_json else logging.WARNING, format="%(message)s")
+    for noisy in ("httpx", "httpcore", "huggingface_hub"):   # 백본을 받을 때 요청마다 찍는 로그
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    files = []
+    for path in map(Path, paths):
+        if path.is_dir():
+            files += sorted(p for p in path.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+        else:
+            files.append(path)
+
+    pipeline = Pipeline.load(Settings.from_env())
+    failed = 0
+    for file in files:
+        try:
+            result = pipeline.run(file)
+        except Exception as err:   # 한 장이 깨져도 나머지는 계속 본다
+            failed += 1
+            print(json.dumps({"file": file.name, "error": str(err)}, ensure_ascii=False) if as_json
+                  else f"{file.name}: 실패 - {err}")
+            continue
+
+        if as_json:
+            print(json.dumps({
+                "file": file.name, "verdict": result.verdict, "section": result.section,
+                "yoloBoxes": result.yolo_boxes, "elapsedMs": result.elapsed_ms,
+                "detections": [{
+                    "detectionId": d.index, "classId": d.candidate.class_id,
+                    "yoloConfidence": d.candidate.confidence,
+                    "detectionBox": [d.candidate.x1, d.candidate.y1, d.candidate.x2, d.candidate.y2],
+                    "swinv2": round(d.swinv2.score, 6), "dinov2": round(d.dinov2_x15.score, 6),
+                    "dinov2X2": round(d.dinov2_x2.score, 6), "saveReasons": d.reasons,
+                } for d in result.detections],
+            }, ensure_ascii=False))
+            continue
+
+        print(f"\n{file.name}  →  {result.verdict}  ({result.elapsed_ms}ms, 구역 {result.section or '-'}, "
+              f"YOLO 박스 {result.yolo_boxes}, 피부색 통과 {len(result.detections)})")
+        for d in result.detections:
+            c = d.candidate
+            print(f"  #{d.index + 1} class{c.class_id} {c.label:20} YOLO {c.confidence:.4f}  "
+                  f"[{c.x1}, {c.y1}, {c.x2}, {c.y2}]")
+            print(f"     SwinV2 x1 {d.swinv2.score:.4f}/{d.swinv2.threshold:.2f}  "
+                  f"DINOv2 x1.5 {d.dinov2_x15.score:.4f}/{d.dinov2_x15.threshold:.2f}  "
+                  f"x2 {d.dinov2_x2.score:.4f}/{d.dinov2_x2.threshold:.2f}  "
+                  f"→ {'양성 ' + ', '.join(d.reasons) if d.positive else '음성'}")
+    return 1 if failed else 0
 
 
 def _split(text: str | None) -> list[str]:
