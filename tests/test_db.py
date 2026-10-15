@@ -140,3 +140,25 @@ def test_두_연결이_동시에_읽고_쓸_수_있다(tmp_path):
 
     writer.close()
     reader.close()
+
+
+def test_보류_컬럼이_없는_옛_DB를_열면_컬럼을_붙인다(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE keywords (
+            id INTEGER PRIMARY KEY, text TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+        INSERT INTO keywords (text, sort_order) VALUES ('beach', 1);
+        PRAGMA user_version = 1;
+    """)
+    old.close()
+
+    conn = connect(path)
+    init_db(conn)
+    init_db(conn)                               # 두 번 열어도 안전하다
+
+    row = conn.execute("SELECT text, held FROM keywords").fetchone()
+    assert (row["text"], row["held"]) == ("beach", 0)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.close()

@@ -70,6 +70,17 @@ copy .env.sample .env
 수집은 서버가 하므로 브라우저를 닫아도 계속됩니다. 서버를 다시 켜면 남아 있던 작업을 자동으로 이어서 합니다.
 오른쪽 위 `중단` / `재개` 버튼으로 수집을 잠시 멈출 수 있습니다.
 
+`키워드 목록`에서 수집 예약 목록(수집할 순서)과 수집 완료 목록(끝난 순서)을 볼 수 있습니다.
+예약 목록에서는 키워드마다 다음을 할 수 있습니다.
+
+| 버튼 | 하는 일 |
+|---|---|
+| `↑` `↓` | 수집 순서 바꾸기. 지금 수집 중인 작업은 끝까지 하고, 다음 작업부터 새 순서를 따릅니다 |
+| `보류` / `보류 해제` | 수집을 잠시 빼 두기. 수집 중이었으면 바로 멈추고, 보류를 풀면 멈춘 페이지부터 이어서 합니다 |
+| `삭제` | 키워드와 수집 기록을 지웁니다. 이미 받은 이미지 파일은 남습니다 |
+
+수집을 마친 키워드는 순서를 바꾸거나 보류·삭제할 수 없습니다.
+
 ### 명령줄로
 
 | 명령 | 하는 일 |
@@ -155,7 +166,7 @@ Start-ScheduledTask -TaskName ImageCollector
 | `.py` 파일, `.env` | 작업 재시작 |
 | 새 라이브러리 | `pip install` 후 작업 재시작 |
 | `schema.sql`에 새 테이블 추가 | 작업 재시작 |
-| `schema.sql`의 기존 테이블 변경 | 재시작만으로는 반영되지 않음. 기존 DB를 바꾸는 작업이 따로 필요 |
+| `schema.sql`의 기존 테이블 변경 | 재시작만으로는 반영되지 않음. `db/connection.py`의 `_migrate`에 기존 DB를 바꾸는 코드를 함께 넣어야 함 |
 
 재시작 후 서버가 뜨지 않으면 작업을 멈추고 `python -m app serve`를 직접 실행해 콘솔의 오류를 확인합니다.
 
@@ -179,6 +190,10 @@ DB 내용은 [DB Browser for SQLite](https://sqlitebrowser.org/) 같은 도구�
 | POST | `/api/sites/{name}/check` | API 연결 확인 |
 | POST | `/api/jobs` | 키워드·사이트 등록. 본문 예: `{"keywords": "beach, sunset", "sites": ["pexels"]}` |
 | GET | `/api/progress` | 키워드별·사이트별 진행 상황, 최대 장수(`max_downloads`) |
+| PUT | `/api/keywords/order` | 예약 키워드 순서 바꾸기. 본문 예: `{"ids": [3, 1, 2]}` |
+| POST | `/api/keywords/{id}/hold` | 예약 키워드 보류 |
+| POST | `/api/keywords/{id}/resume` | 보류 풀기 |
+| DELETE | `/api/keywords/{id}` | 예약 키워드 삭제 (받은 이미지 파일은 남음) |
 | POST | `/api/collector/stop` | 수집 일시 중단 |
 | POST | `/api/collector/start` | 수집 재개 |
 | GET | `/api/health` | 서버 상태 (스케줄러 동작 여부, 남은 작업 수, 절전 방지 여부, 마지막 저장 시각) |
@@ -235,7 +250,7 @@ flowchart TB
 
 | 테이블 | 한 행의 의미 |
 |---|---|
-| `keywords` | 등록한 키워드 1개 |
+| `keywords` | 등록한 키워드 1개 (수집 순서, 보류 여부) |
 | `collect_jobs` | 키워드 × 사이트 수집 작업 1개 (상태, 커서, 진행 카운터) |
 | `images` | 고유한 이미지 1장. 지각 해시 중복은 파일 없이 원본을 가리키는 기록으로 남음 |
 | `image_sources` | 이미지를 어느 사이트의 어떤 키워드 검색에서 발견했는지 |

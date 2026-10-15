@@ -48,6 +48,42 @@ def add_keywords(conn: sqlite3.Connection, keywords: list[str], sites: list[str]
     return keyword_ids
 
 
+# ── 예약 키워드 관리 (순서 · 보류 · 삭제) ─────────────────────────────
+
+
+def get_keyword(conn: sqlite3.Connection, keyword_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM keywords WHERE id = ?", (keyword_id,)).fetchone()
+
+
+def reorder_keywords(conn: sqlite3.Connection, keyword_ids: list[int]) -> None:
+    """예약 키워드를 주어진 순서로 바꾼다.
+
+    이 키워드들이 쓰던 sort_order 값들을 모아 새 순서대로 다시 나눠 준다.
+    그래서 목록에 없는 키워드(수집 완료 등)의 자리는 그대로다.
+    """
+    marks = ",".join("?" * len(keyword_ids))
+    orders = sorted(row[0] for row in conn.execute(
+        f"SELECT sort_order FROM keywords WHERE id IN ({marks})", keyword_ids))
+    for keyword_id, order in zip(keyword_ids, orders):
+        conn.execute("UPDATE keywords SET sort_order = ? WHERE id = ?", (order, keyword_id))
+    conn.commit()
+
+
+def set_held(conn: sqlite3.Connection, keyword_id: int, held: bool) -> None:
+    conn.execute("UPDATE keywords SET held = ? WHERE id = ?", (int(held), keyword_id))
+    conn.commit()
+
+
+def delete_keyword(conn: sqlite3.Connection, keyword_id: int) -> None:
+    """키워드와 그 수집 작업·출처 기록을 지운다 (외래키 CASCADE).
+
+    이미 저장한 이미지 파일과 images 행은 남긴다. 나중에 같은 키워드를 다시 등록하면
+    SHA-256 검사가 같은 파일을 알아보고 다시 저장하지 않는다.
+    """
+    conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
+    conn.commit()
+
+
 # ── 스케줄러용 ──────────────────────────────────────────────────────
 
 _JOB_COLUMNS = "j.*, k.text AS keyword"
@@ -67,7 +103,7 @@ def next_runnable_job(conn: sqlite3.Connection, site: str, now: str) -> sqlite3.
     return conn.execute(
         f"""
         SELECT {_JOB_COLUMNS} FROM collect_jobs j JOIN keywords k ON k.id = j.keyword_id
-        WHERE j.site = ?
+        WHERE j.site = ? AND k.held = 0
           AND (j.status = 'pending' OR (j.status = 'paused' AND j.resume_at <= ?))
         ORDER BY k.sort_order LIMIT 1
         """,
@@ -76,16 +112,23 @@ def next_runnable_job(conn: sqlite3.Connection, site: str, now: str) -> sqlite3.
 
 
 def earliest_resume(conn: sqlite3.Connection, site: str) -> str | None:
-    """쉬고 있는 작업 중 가장 먼저 깨어날 시각. 쉬는 작업이 없으면 None."""
+    """쉬고 있는 작업 중 가장 먼저 깨어날 시각. 쉬는 작업이 없으면 None. 보류한 키워드는 빼고 본다."""
     return conn.execute(
-        "SELECT MIN(resume_at) FROM collect_jobs WHERE site = ? AND status = 'paused'", (site,)
+        """
+        SELECT MIN(j.resume_at) FROM collect_jobs j JOIN keywords k ON k.id = j.keyword_id
+        WHERE j.site = ? AND j.status = 'paused' AND k.held = 0
+        """,
+        (site,),
     ).fetchone()[0]
 
 
 def count_unfinished_jobs(conn: sqlite3.Connection) -> int:
-    """아직 끝나지 않은 작업 수 (대기·수집 중·한도 대기·일시 정지)."""
+    """아직 끝나지 않은 작업 수 (대기·수집 중·한도 대기·일시 정지). 보류한 키워드는 세지 않는다."""
     return conn.execute(
-        "SELECT COUNT(*) FROM collect_jobs WHERE status NOT IN ('done', 'failed')"
+        """
+        SELECT COUNT(*) FROM collect_jobs j JOIN keywords k ON k.id = j.keyword_id
+        WHERE j.status NOT IN ('done', 'failed') AND k.held = 0
+        """
     ).fetchone()[0]
 
 
@@ -232,7 +275,12 @@ def load_phashes(conn: sqlite3.Connection) -> list[tuple[str, int]]:
 
 def progress(conn: sqlite3.Connection) -> list[dict]:
     """키워드별 진행 상황. 화면과 CLI 가 그대로 보여 준다."""
-    keywords = conn.execute("SELECT * FROM keywords ORDER BY sort_order").fetchall()
+    keywords = conn.execute(
+        """
+        SELECT k.*, (SELECT MAX(finished_at) FROM collect_jobs WHERE keyword_id = k.id) AS finished_at
+        FROM keywords k ORDER BY k.sort_order
+        """
+    ).fetchall()
     jobs = conn.execute("SELECT * FROM collect_jobs ORDER BY site").fetchall()
 
     result = []
@@ -241,6 +289,8 @@ def progress(conn: sqlite3.Connection) -> list[dict]:
             "id": keyword["id"],
             "keyword": keyword["text"],
             "status": keyword["status"],
+            "held": bool(keyword["held"]),
+            "finished_at": keyword["finished_at"] if keyword["status"] == "collected" else None,   # UTC
             "jobs": [
                 {name: job[name] for name in (
                     "site", "status", "downloaded", "duplicates", "skipped", "errors",

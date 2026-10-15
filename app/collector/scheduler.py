@@ -54,6 +54,7 @@ class Scheduler:
             limiter = RateLimiter(source.rate_limit, source.rate_window, clock=monotonic, sleep=sleep)
             self.limiters[name] = source.limiter = limiter
         self._tasks: dict[str, asyncio.Task] = {}
+        self._current: dict[str, int] = {}      # 사이트 → 지금 수집 중인 키워드 ID
         self._wake = {name: asyncio.Event() for name in sources}
 
     # ── 실행 제어 ───────────────────────────────────────────────────
@@ -85,6 +86,22 @@ class Scheduler:
         """새 작업이 등록됐음을 알린다. 잠든 태스크가 바로 일어나 확인한다."""
         for event in self._wake.values():
             event.set()
+
+    async def release_keyword(self, keyword_id: int) -> None:
+        """이 키워드를 수집 중인 사이트 태스크를 멈췄다가 다시 띄운다 (보류·삭제할 때).
+
+        멈춘 작업은 pending 으로 돌아가고 커서가 남아 있어, 보류를 풀면 그 페이지부터 이어서 한다.
+        보류 표시를 먼저 해 두고 불러야 다시 뜬 태스크가 같은 키워드를 또 집어 들지 않는다.
+        """
+        sites = [site for site, current in self._current.items() if current == keyword_id]
+        tasks = [self._tasks[site] for site in sites if site in self._tasks and not self._tasks[site].done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for site in sites:
+            self._current.pop(site, None)
+            if site in self._tasks:
+                self._tasks[site] = asyncio.create_task(self._site_loop(site, exit_when_idle=False), name=site)
 
     # ── 사이트 하나의 루프 ──────────────────────────────────────────
 
@@ -124,12 +141,14 @@ class Scheduler:
     async def _run_one(self, job: sqlite3.Row, source: Source) -> None:
         conn, job_id, label = self.conn, job["id"], f"[{source.name}] '{job['keyword']}'"
         repo.mark_running(conn, job_id, to_db(self.clock()))
+        self._current[source.name] = job["keyword_id"]
 
         try:
             await run_job(job_id, source, self.limiters[source.name], self.deps)
 
         except asyncio.CancelledError:
             repo.set_status(conn, job_id, "pending")
+            self._current.pop(source.name, None)
             raise
 
         except AuthFailure as err:
@@ -149,6 +168,8 @@ class Scheduler:
         else:
             repo.set_status(conn, job_id, "done", finished_at=to_db(self.clock()))
             log.info("%s 완료", label)
+
+        self._current.pop(source.name, None)
 
         # 이 키워드를 모든 사이트가 끝냈으면 검출 작업을 등록한다
         if repo.complete_keyword_if_finished(conn, job["keyword_id"]):

@@ -113,7 +113,8 @@ def _print_progress(conn) -> None:
     if not rows:
         print("등록된 키워드가 없습니다.")
     for keyword in rows:
-        print(f"\n{keyword['keyword']}  [{keyword['status']}]")
+        held = " · 보류" if keyword["held"] else ""
+        print(f"\n{keyword['keyword']}  [{keyword['status']}{held}]")
         for job in keyword["jobs"]:
             done = job["downloaded"] + job["duplicates"] + job["skipped"] + job["errors"]
             total = job["total_available"] if job["total_available"] is not None else "?"

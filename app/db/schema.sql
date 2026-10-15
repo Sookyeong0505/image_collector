@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS keywords (
     sort_order  INTEGER NOT NULL,              -- 입력한 순서. 사이트는 이 순서대로 키워드를 처리한다
     status      TEXT    NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending', 'collecting', 'collected')),
+    held        INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0, 1)),  -- 1 = 보류. 스케줄러가 이 키워드의 작업을 건너뛴다
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 

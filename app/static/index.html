@@ -41,6 +41,21 @@
   .ratio { margin-left:6px; font-size:13px; }
   #limit { margin-top:8px; font-size:13px; }
   .error { white-space:normal; font-size:13px; }
+  .lists { display:grid; grid-template-columns:3fr 2fr; gap:16px; }
+  @media (max-width:720px) { .lists { grid-template-columns:1fr; } }
+  .lists > div { min-width:0; }
+  h3 { font-size:13px; font-weight:normal; color:var(--muted); margin:0 0 8px; }
+  ol.keywords { list-style:none; margin:0; padding:0; border-top:1px solid var(--line); counter-reset:kw; }
+  ol.keywords li { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; padding:6px 0;
+                   border-bottom:1px solid var(--line); counter-increment:kw; font-variant-numeric:tabular-nums; }
+  ol.keywords li::before { content:counter(kw); width:1.8em; text-align:right; color:var(--muted); font-size:13px; }
+  ol.keywords li.held .kw { color:var(--muted); text-decoration:line-through; }
+  ol.keywords .kw { font-weight:bold; flex:1 1 8em; min-width:0; overflow-wrap:anywhere; }
+  ol.keywords .meta { font-size:13px; }
+  ol.keywords .actions { display:flex; gap:4px; margin-left:auto; }
+  ol.keywords .empty { color:var(--muted); font-size:13px; }
+  ol.keywords .empty::before { content:none; }
+  button.danger { color:var(--bad); }
 </style>
 </head>
 <body>
@@ -62,6 +77,20 @@
     </div>
     <div id="limit" class="muted"></div>
     <div id="message"></div>
+  </section>
+
+  <section>
+    <h2>키워드 목록</h2>
+    <div class="lists">
+      <div>
+        <h3>수집 예약 · 위에서부터 차례로 수집합니다</h3>
+        <ol id="queued" class="keywords"></ol>
+      </div>
+      <div>
+        <h3>수집 완료 · 끝난 순서</h3>
+        <ol id="collected" class="keywords"></ol>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -131,6 +160,59 @@ async function submit() {
   } catch (error) { say(error.message, "bad"); }
 }
 
+const send = async (path, options = {}) => {
+  try {
+    await api(path, { headers: { "Content-Type": "application/json" }, ...options });
+    refresh();
+  } catch (error) { say(error.message, "bad"); }
+};
+const button = (text, label, onclick, { disabled = false, className = "small" } = {}) =>
+  el("button", { className, textContent: text, title: label, ariaLabel: label, disabled, onclick });
+const savedOf = (keyword) => keyword.jobs.reduce((sum, job) => sum + job.downloaded, 0);
+const localDateTime = (utc) => new Date(utc.replace(" ", "T") + "Z").toLocaleString();
+
+// 수집 예약: 순서 바꾸기 · 보류 · 삭제. 지금 수집 중인 작업은 순서를 바꿔도 끝까지 하고, 다음 작업부터 새 순서를 따른다.
+function queuedItem(keyword, index, queued) {
+  const [label, cls] = keyword.held ? ["보류", "warn"] : (STATUS[keyword.status] || [keyword.status, ""]);
+  const move = (delta) => {
+    const ids = queued.map((item) => item.id);
+    [ids[index], ids[index + delta]] = [ids[index + delta], ids[index]];
+    send("/api/keywords/order", { method: "PUT", body: JSON.stringify({ ids }) });
+  };
+  const name = keyword.keyword;
+  return el("li", { className: keyword.held ? "held" : "" },
+    el("span", { className: "kw", textContent: name }),
+    el("span", { className: `meta ${cls}`, textContent: label }),
+    el("span", { className: "meta muted", textContent: `${savedOf(keyword).toLocaleString()}장` }),
+    el("span", { className: "actions" },
+      button("↑", `${name} 위로`, () => move(-1), { disabled: index === 0 }),
+      button("↓", `${name} 아래로`, () => move(1), { disabled: index === queued.length - 1 }),
+      keyword.held
+        ? button("보류 해제", `${name} 보류 해제`, () => send(`/api/keywords/${keyword.id}/resume`, { method: "POST" }))
+        : button("보류", `${name} 보류`, () => send(`/api/keywords/${keyword.id}/hold`, { method: "POST" })),
+      button("삭제", `${name} 삭제`, () => {
+        if (confirm(`'${name}' 키워드를 삭제할까요?
+수집 기록은 지워지고, 이미 받은 이미지 파일은 남습니다.`))
+          send(`/api/keywords/${keyword.id}`, { method: "DELETE" });
+      }, { className: "small danger" })));
+}
+
+function collectedItem(keyword) {
+  return el("li", {},
+    el("span", { className: "kw", textContent: keyword.keyword }),
+    el("span", { className: "meta muted", textContent: `${savedOf(keyword).toLocaleString()}장` }),
+    el("span", { className: "meta muted", textContent: keyword.finished_at ? localDateTime(keyword.finished_at) : "" }));
+}
+
+function renderKeywordLists(keywords) {
+  const queued = keywords.filter((keyword) => keyword.status !== "collected");   // 서버가 수집 순서대로 준다
+  const collected = keywords.filter((keyword) => keyword.status === "collected")
+    .sort((a, b) => (a.finished_at || "").localeCompare(b.finished_at || ""));
+  const empty = (text) => el("li", { className: "empty", textContent: text });
+  $("queued").replaceChildren(...(queued.length ? queued.map((k, i) => queuedItem(k, i, queued)) : [empty("예약된 키워드가 없습니다.")]));
+  $("collected").replaceChildren(...(collected.length ? collected.map(collectedItem) : [empty("아직 수집을 마친 키워드가 없습니다.")]));
+}
+
 function jobRow(job) {
   const [label, cls] = STATUS[job.status] || [job.status, ""];
   // 진행바 분모는 사이트가 알려 준 '이 키워드로 받을 수 있는 전체 수'. 첫 검색 페이지를 받아야 알 수 있다.
@@ -162,9 +244,11 @@ async function refresh() {
       await api(`/api/collector/${data.running ? "stop" : "start"}`, { method: "POST" });
       refresh();
     };
+    renderKeywordLists(data.keywords);
     const rows = data.keywords.flatMap((keyword) => {
       const [label] = STATUS[keyword.status] || [keyword.status];
-      const head = el("tr", { className: "keyword" }, el("td", { colSpan: 8, textContent: `${keyword.keyword} — ${label}` }));
+      const held = keyword.held ? " · 보류" : "";
+      const head = el("tr", { className: "keyword" }, el("td", { colSpan: 8, textContent: `${keyword.keyword} — ${label}${held}` }));
       return [head, ...keyword.jobs.map(jobRow)];
     });
     $("progress").replaceChildren(...(rows.length ? rows

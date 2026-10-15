@@ -8,6 +8,10 @@
     POST /api/sites/{name}/check  API 연결 확인
     POST /api/jobs                키워드·사이트 등록 → 수집 시작
     GET  /api/progress            키워드별·사이트별 진행 상황
+    PUT  /api/keywords/order      예약 키워드 순서 바꾸기
+    POST /api/keywords/{id}/hold  예약 키워드 보류
+    POST /api/keywords/{id}/resume 보류 풀기
+    DELETE /api/keywords/{id}     예약 키워드 삭제 (받은 이미지 파일은 남는다)
     POST /api/collector/stop      수집 일시 중단
     POST /api/collector/start     수집 재개
     GET  /api/health              서버 상태 (살아 있는지, 수집 중인지)
@@ -38,6 +42,10 @@ INDEX_HTML = Path(__file__).parent / "static" / "index.html"
 class JobRequest(BaseModel):
     keywords: str = Field(description="쉼표로 구분한 키워드", examples=["beach, sunset"])
     sites: list[str] = Field(description="수집할 사이트", examples=[["pexels", "naver"]])
+
+
+class OrderRequest(BaseModel):
+    ids: list[int] = Field(description="예약 키워드 ID 를 수집할 순서대로", examples=[[3, 1, 2]])
 
 
 def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -114,6 +122,57 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             "max_downloads": runtime.settings.target_count,   # .env 의 MAX_DOWNLOADS
             "keywords": repo.progress(runtime.conn),
         }
+
+    # ── 예약 키워드 관리 ──────────────────────────────────────────
+
+    def queued_keyword(runtime: Runtime, keyword_id: int):
+        """수집이 끝나지 않은 키워드만 순서 변경·보류·삭제할 수 있다."""
+        keyword = repo.get_keyword(runtime.conn, keyword_id)
+        if keyword is None:
+            raise HTTPException(404, f"없는 키워드: {keyword_id}")
+        if keyword["status"] == "collected":
+            raise HTTPException(409, f"이미 수집을 마친 키워드입니다: {keyword['text']}")
+        return keyword
+
+    @app.put("/api/keywords/order")
+    async def reorder_keywords(body: OrderRequest, request: Request):
+        runtime = runtime_of(request)
+        ids = list(dict.fromkeys(body.ids))
+        if not ids:
+            raise HTTPException(400, "키워드 ID 를 하나 이상 보내세요")
+        for keyword_id in ids:
+            queued_keyword(runtime, keyword_id)
+        repo.reorder_keywords(runtime.conn, ids)
+        # 지금 수집 중인 작업은 그대로 두고, 각 사이트가 다음 작업을 고를 때부터 새 순서를 따른다
+        return {"ids": ids}
+
+    @app.post("/api/keywords/{keyword_id}/hold")
+    async def hold_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = queued_keyword(runtime, keyword_id)
+        repo.set_held(runtime.conn, keyword_id, True)
+        await runtime.scheduler.release_keyword(keyword_id)   # 수집 중이었으면 멈추고 다음 키워드로
+        logging.getLogger(__name__).info("'%s' 보류", keyword["text"])
+        return {"id": keyword_id, "held": True}
+
+    @app.post("/api/keywords/{keyword_id}/resume")
+    async def resume_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = queued_keyword(runtime, keyword_id)
+        repo.set_held(runtime.conn, keyword_id, False)
+        runtime.scheduler.wake()
+        logging.getLogger(__name__).info("'%s' 보류 해제", keyword["text"])
+        return {"id": keyword_id, "held": False}
+
+    @app.delete("/api/keywords/{keyword_id}")
+    async def delete_keyword(keyword_id: int, request: Request):
+        runtime = runtime_of(request)
+        keyword = queued_keyword(runtime, keyword_id)
+        repo.set_held(runtime.conn, keyword_id, True)          # 먼저 보류해 다시 집어 들지 않게 한 뒤
+        await runtime.scheduler.release_keyword(keyword_id)   # 수집 중인 작업을 멈추고
+        repo.delete_keyword(runtime.conn, keyword_id)         # 지운다
+        logging.getLogger(__name__).info("'%s' 삭제", keyword["text"])
+        return {"id": keyword_id, "deleted": True}
 
     @app.get("/api/health")
     async def health(request: Request):

@@ -32,6 +32,7 @@ Node로 만들었던 수집기를 Python으로 다시 만들면서 합의한 내
 | F11 | 저장 경로 | `{BASE_SAVE_PATH}\{키워드}\{사이트}\{키워드}_{출처ID}.{확장자}` |
 | F12 | 키워드 수집 완료 시 검출 자동 시작 | 모든 사이트 작업이 `done` 또는 `failed`가 되면 `detection_jobs`에 등록 |
 | F13 | 오류 로그 | 파일 로그(`logs/`) + 작업별 `last_error` |
+| F14 | 예약 키워드 관리 | 순서 변경(`sort_order` 재배치), 보류(`keywords.held`, 스케줄러가 건너뜀), 삭제(키워드·작업·출처 기록 삭제, 이미지 파일과 `images` 행은 유지). 수집 중인 키워드를 보류·삭제하면 그 사이트 태스크를 멈췄다가 다시 띄운다 |
 
 Node 버전에서 가져오는 것: 재시도 fetch, 시간당 한도 관리, 매직바이트 검증, `.part` 임시파일 후 rename,
 로그의 API 키 마스킹, "엔진 + 사이트 명세(spec)" 구조.
@@ -137,6 +138,7 @@ erDiagram
         text text UK
         int sort_order
         text status
+        int held
     }
     collect_jobs {
         int id PK
@@ -179,7 +181,7 @@ erDiagram
 
 | 테이블 | 한 행의 의미 | 핵심 제약 |
 |---|---|---|
-| `keywords` | 사용자가 입력한 키워드 1개 | `text` UNIQUE |
+| `keywords` | 사용자가 입력한 키워드 1개. `held` = 1 이면 보류 | `text` UNIQUE |
 | `collect_jobs` | 키워드 × 사이트 수집 작업 1개 | `(keyword_id, site)` UNIQUE |
 | `images` | 고유한 이미지 1장 (또는 L2 중복 기록 1건) | `sha256` UNIQUE, `path`가 없으면 `duplicate_of` 필수 |
 | `image_sources` | "이 이미지를 어느 사이트·키워드에서 발견했나" | `(site, source_id, keyword_id)` PK |
