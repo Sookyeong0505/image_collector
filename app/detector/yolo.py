@@ -7,6 +7,7 @@ reference/src/App.tsx 의 preprocessSection, runDetection, calculateIoU, applyNm
           → 구역별 최고 점수를 비교해 한 구역만 채택
 """
 
+import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+log = logging.getLogger(__name__)
 
 CLASSES = (
     "EXPOSED_BELLY",
@@ -218,14 +221,30 @@ class YoloDetector:
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yolo-resize")
 
     @classmethod
-    def load(cls, model_path: Path) -> "YoloDetector":
+    def load(cls, model_path: Path, device: str = "cpu") -> "YoloDetector":
+        """device 가 'cuda' 면 GPU 로 추론한다 (onnxruntime-gpu 필요). 쓸 수 없으면 CPU 로 돌고 로그를 남긴다.
+
+        GPU 추론은 CPU 와 소수점 끝자리가 조금 다르다 (점수 차이 약 0.000001). reference 비교는 명세 9-2.
+        """
+        if device == "cuda":
+            # onnxruntime-gpu 는 torch 가 함께 깔아 둔 CUDA 12 · cuDNN 9 DLL 을 쓴다. torch 를 먼저 불러와야 찾는다.
+            import torch  # noqa: F401
         import onnxruntime as ort
 
         if not model_path.is_file():
             raise FileNotFoundError(f"YOLO 모델 파일이 없습니다: {model_path}")
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        session = ort.InferenceSession(str(model_path), options, providers=["CPUExecutionProvider"])
+        providers = ["CPUExecutionProvider"]
+        if device == "cuda":
+            # DEFAULT: 매번 같은 합성곱 알고리즘을 써서 실행할 때마다 결과가 흔들리지 않게 한다
+            cuda = ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "DEFAULT", "use_tf32": 0})
+            providers = [cuda, "CPUExecutionProvider"]
+        session = ort.InferenceSession(str(model_path), options, providers=providers)
+        if device == "cuda" and session.get_providers()[0] != "CUDAExecutionProvider":
+            log.warning("YOLO 를 GPU 로 돌릴 수 없어 CPU 로 돌립니다 (onnxruntime-gpu 와 CUDA 12 · cuDNN 9 확인)")
+        else:
+            log.info("YOLO 실행 장치: %s", session.get_providers()[0])
         return cls(session)
 
     def detect_section(self, image: Image.Image, section: Section, cache: dict | None = None) -> SectionResult:

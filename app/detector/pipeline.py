@@ -92,7 +92,7 @@ class Pipeline:
         """YOLO 와 head 파일을 읽는다. 백본은 첫 검출 때 올린다. 모델 파일이 없으면 FileNotFoundError."""
         device = resolve_device(settings.detect_device)
         return cls(
-            YoloDetector.load(settings.model_dir / YOLO_MODEL),
+            YoloDetector.load(settings.model_dir / YOLO_MODEL, device.type),   # 백본과 같은 장치
             Verifier(swinv2_spec(settings.model_dir), device),
             Verifier(dinov2_spec(settings.model_dir), device),
         )

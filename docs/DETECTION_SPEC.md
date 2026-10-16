@@ -361,7 +361,11 @@ GPU용 torch는 PyPI 기본 패키지가 아니라 PyTorch 인덱스에서 받�
 .venv\Scripts\python -m pip install -e .[dev,detect]
 ```
 
-이 PC(드라이버 CUDA 13.4)에서는 torch 2.11.0+cu128, torchvision 0.26.0, transformers 5.19.0, onnxruntime 1.31.0으로 확인했습니다.
+이 PC(드라이버 CUDA 13.4)에서는 torch 2.11.0+cu128, torchvision 0.26.0, transformers 5.19.0, onnxruntime-gpu 1.26.0으로 확인했습니다.
+
+YOLO 도 GPU 로 돌리기 위해 `onnxruntime` 대신 `onnxruntime-gpu` 를 씁니다(CPU 로도 돕니다). 두 패키지를 함께 깔면 충돌하므로 하나만 둡니다.
+PyPI 의 `onnxruntime-gpu` 1.27 이상은 CUDA 13 용이라, torch(cu128)가 깔아 둔 CUDA 12 · cuDNN 9 DLL 과 맞지 않아 조용히 CPU 로 돕니다.
+그래서 `<1.27` 로 묶었습니다. torch 를 onnxruntime 보다 먼저 불러와야 그 DLL 을 찾습니다(`YoloDetector.load` 가 처리).
 reference는 torch 2.13.0을 썼지만 cu128 인덱스에는 2.11이 최신이었습니다. 버전 차이가 점수에 주는 영향은 9-2 비교에서 함께 드러납니다.
 
 ## 9. 검증 방법
@@ -442,6 +446,17 @@ Chrome은 이미지를 크게 줄일 때 절반씩 줄인 사본(밉맵)을 미�
 - 세 구역의 밉맵을 한 번만 만들고, 세 구역 리사이즈를 스레드 3개로 동시에 실행 (첫 구역 YOLO 와 겹침)
 
 그 결과 리사이즈 + YOLO 3구역이 이미지당 523ms → 279ms 가 됐습니다.
+
+이어서 **YOLO 를 GPU 로** 옮겼습니다(`DETECT_DEVICE` 를 따름). 한 번 추론이 34ms → 13ms 입니다.
+
+| 확인 | 결과 |
+|---|---|
+| 실제 이미지 300장, CPU YOLO ↔ GPU YOLO | 판정·구역·박스·판정 사유 **300장 모두 같음**. YOLO 점수 최대 차이 0.0001 |
+| 이미지당 처리 시간 (워커가 돌지 않을 때) | CPU YOLO 330ms → GPU YOLO **236ms** (1.4배) |
+| 9-2 reference 비교 다시 | 판정 일치 98.7%, YOLO 점수 차이 평균 0.0086 (CPU 일 때와 같음) |
+
+처음 실제 검출(이미지당 약 500ms)과 비교하면 약 2배 빨라졌습니다. 남은 시간의 대부분은 CPU 리사이즈입니다.
+다음 장을 미리 준비해 GPU 판정과 겹치는 방식도 시험했지만 1.1배에 그쳐 넣지 않았습니다.
 
 ## 10. 개발 순서
 

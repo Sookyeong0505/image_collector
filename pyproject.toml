@@ -17,7 +17,8 @@ dev = ["pytest"]
 # GPU 로 돌리려면 torch 를 먼저 PyTorch 인덱스에서 설치한다 (README 참고).
 detect = [
     "numpy",
-    "onnxruntime",      # YOLO ONNX 추론 (CPU)
+    # YOLO ONNX 추론. GPU 판(CPU 로도 돈다). 1.27 부터는 CUDA 13 용이라 torch(cu128)의 CUDA 12 DLL 과 맞지 않는다.
+    "onnxruntime-gpu>=1.20,<1.27",
     "torch",            # SwinV2 · DINOv2 백본과 head
     "torchvision",      # transformers 의 빠른 이미지 전처리기가 쓴다 (reference 도 설치했다)
     "transformers",     # Hugging Face 백본 로드

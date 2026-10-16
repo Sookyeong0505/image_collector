@@ -93,6 +93,9 @@ copy .env.sample .env
 .venv\Scripts\python -m pip install -e .[dev,detect]
 ```
 
+YOLO 는 `onnxruntime-gpu`(1.27 미만, CUDA 12 용)로 GPU 에서 돕니다. 예전에 CPU 판 `onnxruntime` 을 깔았다면
+`.venv\Scripts\python -m pip uninstall onnxruntime` 으로 먼저 지웁니다(두 판을 함께 두면 충돌). `.env` 의 `DETECT_DEVICE=cpu` 면 CPU 로 돕니다.
+
 모델 파일은 `models\` 아래에 둡니다 (`yolo\best_640n_0522.onnx`, `swinv2\run_…\`, `dinov2\run_…\`). git 에는 올리지 않습니다.
 백본(SwinV2·DINOv2, 약 2GB)은 처음 검출할 때 Hugging Face 에서 받습니다.
 
